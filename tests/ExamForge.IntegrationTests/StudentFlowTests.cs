@@ -621,4 +621,50 @@ public sealed class StudentFlowTests(ExamForgeWebFactory factory)
         // Один вопрос из трёх отвечен верно (1 из 6) — именно сохранённая ревизия учтена.
         Assert.Equal(1m, finished.GetProperty("earnedPoints").GetDecimal());
     }
+
+    [Fact]
+    public async Task ReloadState_RestoresSavedAnswer_WithoutKeys()
+    {
+        // P0-05: F5 → GetState возвращает собственный сохранённый ответ студента,
+        // чтобы редактор открылся восстановленным; ключей и оценивания в payload нет (AC-11).
+        var seed = await SeedAsync();
+        var client = await ExchangedClientAsync(seed.StudentCode);
+        var attemptId = await StartAttemptAsync(client, seed.Assignment.Id);
+        var sessionId = await CurrentSessionIdAsync(client, attemptId);
+
+        var save = await client.PutAsJsonAsync($"/api/attempts/{attemptId}/answers/{sessionId}",
+            new { answer = new { selectedOptionId = "a" } });
+        save.EnsureSuccessStatusCode();
+
+        var state = await GetJsonAsync(client, $"/api/attempts/{attemptId}/state");
+        var question = state.GetProperty("currentQuestion");
+        var savedJson = question.GetProperty("savedAnswerJson").GetString();
+        Assert.NotNull(savedJson);
+        using var doc = JsonDocument.Parse(savedJson!);
+        Assert.Equal("a", doc.RootElement.GetProperty("selectedOptionId").GetString());
+
+        // Восстановленный ответ не содержит ключей/оценивания (AC-11).
+        var raw = question.GetRawText().ToLowerInvariant();
+        Assert.DoesNotContain("correctoptionid", raw);
+        Assert.DoesNotContain("acceptedanswers", raw);
+        Assert.DoesNotContain("iscorrect", raw);
+        Assert.DoesNotContain("\"correct\"", raw);
+    }
+
+    [Fact]
+    public async Task ReloadState_NoSavedAnswer_OpensEmpty()
+    {
+        // P0-05: если ответа ещё нет — savedAnswerJson отсутствует (клиент открывает пустым)
+        // и пустое состояние не создаёт ревизию без действия пользователя.
+        var seed = await SeedAsync();
+        var client = await ExchangedClientAsync(seed.StudentCode);
+        var attemptId = await StartAttemptAsync(client, seed.Assignment.Id);
+        await OpenNextAsync(client, attemptId);
+
+        var state = await GetJsonAsync(client, $"/api/attempts/{attemptId}/state");
+        var question = state.GetProperty("currentQuestion");
+        Assert.False(question.TryGetProperty("savedAnswerJson", out _)
+            && question.GetProperty("savedAnswerJson").ValueKind is not JsonValueKind.Null);
+        Assert.Equal(0, state.GetProperty("sessions")[0].GetProperty("revision").GetInt32());
+    }
 }

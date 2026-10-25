@@ -448,7 +448,15 @@ public sealed class StudentFlowService(ExamForgeDbContext db, TimeProvider timeP
             var variant = attempt.VariantId is null
                 ? null
                 : await db.Variants.AsNoTracking().SingleOrDefaultAsync(v => v.Id == attempt.VariantId, ct);
-            current = await ProjectQuestionAsync(active, variant, ct);
+            // P0-05: после F5/reconnect студент продолжает со своего последнего сохранённого
+            // ответа; DTO отдаёт только собственную ревизию, ключей в ней нет (AC-11).
+            string? savedAnswerJson = null;
+            if (active.AnswerRevision > 0)
+                savedAnswerJson = await db.AnswerRevisions.AsNoTracking()
+                    .Where(r => r.QuestionSessionId == active.Id && r.Revision == active.AnswerRevision)
+                    .Select(r => r.AnswerJson)
+                    .FirstOrDefaultAsync(ct);
+            current = await ProjectQuestionAsync(active, variant, savedAnswerJson, ct);
         }
 
         return new AttemptStateDto(
@@ -464,7 +472,8 @@ public sealed class StudentFlowService(ExamForgeDbContext db, TimeProvider timeP
 
     /// <summary>Проекция без ключей: CorrectOptionId/ключи/объяснения не сериализуются (AC-11).
     /// Порядок отображаемых списков — по варианту попытки (ТЗ §8).</summary>
-    private async Task<StudentQuestionDto> ProjectQuestionAsync(QuestionSession session, Domain.Testing.Variant? variant, CancellationToken ct)
+    private async Task<StudentQuestionDto> ProjectQuestionAsync(
+        QuestionSession session, Domain.Testing.Variant? variant, string? savedAnswerJson, CancellationToken ct)
     {
         var version = await db.QuestionVersions.AsNoTracking().SingleAsync(v => v.Id == session.QuestionVersionId, ct);
         var definition = QuestionDefinitionJson.Deserialize(version.DefinitionJson);
@@ -503,7 +512,7 @@ public sealed class StudentFlowService(ExamForgeDbContext db, TimeProvider timeP
 
         return new StudentQuestionDto(
             session.Id, version.Id, session.OrderIndex, definition.Type.ToString(), definition.Prompt, definition.Instruction,
-            version.ProposedTimeLimitSeconds, options, tiles, left, right, items, fields, blanks);
+            version.ProposedTimeLimitSeconds, options, tiles, left, right, items, fields, blanks, savedAnswerJson);
     }
 
     private static IReadOnlyList<StudentOptionDto> OrderOptions(

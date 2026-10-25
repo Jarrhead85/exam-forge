@@ -32,7 +32,8 @@ public sealed record StudentOptionDto(string Id, string Text);
 
 public sealed record StudentTileDto(string TileId, char Letter);
 
-/// <summary>Вопрос для отображения: только формулировка, display options, media-поля и время.</summary>
+/// <summary>Вопрос для отображения: только формулировка, display options, media-поля и время.
+/// SavedAnswerJson — собственная сохранённая ревизия ответа студента (P0-05); ключей и оценивания в ней нет.</summary>
 public sealed record StudentQuestionDto(
     Guid QuestionSessionId,
     Guid QuestionVersionId,
@@ -47,7 +48,8 @@ public sealed record StudentQuestionDto(
     IReadOnlyList<StudentOptionDto>? MatchingRight,
     IReadOnlyList<StudentOptionDto>? OrderingItems,
     IReadOnlyList<StudentOptionDto>? StructuredFields,
-    IReadOnlyList<string>? BlankIds);
+    IReadOnlyList<string>? BlankIds,
+    string? SavedAnswerJson = null);
 
 public sealed record SessionBriefDto(int OrderIndex, string State, int Revision, DateTimeOffset? DeadlineUtc);
 

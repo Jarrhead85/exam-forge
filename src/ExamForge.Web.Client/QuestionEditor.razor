@@ -168,12 +168,61 @@ else
     private List<string> Order { get; set; } = [];
     private readonly Dictionary<string, string> Values = [];
 
+    private Guid _loadedSessionId;
+
     private int Slots => (Question.Tiles?.Count ?? 0);
 
     protected override void OnParametersSet()
     {
+        // Смена вопроса = новый чистый редактор: state предыдущего вопроса не должен
+        // протекать в следующий (иначе пустое/чужое значение стало бы новой ревизией).
+        // P0-05: затем восстановление собственной сохранённой ревизии (после F5).
+        if (_loadedSessionId != Question.QuestionSessionId)
+        {
+            _loadedSessionId = Question.QuestionSessionId;
+            ResetState();
+            RestoreSavedAnswer();
+        }
         if (Order.Count == 0 && Question.OrderingItems is { Count: > 0 })
             Order = Question.OrderingItems.Select(o => o.Id).ToList();
+    }
+
+    private void ResetState()
+    {
+        Selected = null;
+        SelectedMulti.Clear();
+        Text = string.Empty;
+        SelectedLeft = null;
+        Pairs.Clear();
+        Placed.Clear();
+        Order = [];
+        Values.Clear();
+    }
+
+    private void RestoreSavedAnswer()
+    {
+        var answer = SavedAnswerJsonParser.Parse(Question.Type, Question.SavedAnswerJson);
+        if (answer is null)
+            return; // ответа ещё нет — редактор остаётся пустым (P0-05)
+        Selected = answer.Selected;
+        foreach (var id in answer.SelectedIds)
+            SelectedMulti.Add(id);
+        Text = answer.Text;
+        foreach (var pair in answer.Pairs)
+            Pairs[pair.Key] = pair.Value;
+        foreach (var tileId in answer.TileSequence)
+        {
+            var tile = (Question.Tiles ?? []).FirstOrDefault(t => t.TileId == tileId);
+            if (tile is not null)
+                Placed.Add((tile.TileId, tile.Letter));
+        }
+        // Порядок из сохранённого ответа полностью валиден относительно items.
+        if (Question.OrderingItems is { Count: > 0 }
+            && answer.Order.Count == Question.OrderingItems.Count
+            && answer.Order.All(id => Question.OrderingItems.Any(o => o.Id == id)))
+            Order = [.. answer.Order];
+        foreach (var value in answer.Values)
+            Values[value.Key] = value.Value;
     }
 
     public object BuildAnswer() => Question.Type switch
