@@ -572,4 +572,53 @@ public sealed class StudentFlowTests(ExamForgeWebFactory factory)
         var response = await client.PostAsJsonAsync($"/api/assignments/{seed.Assignment.Id}/attempts", new { });
         Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
     }
+
+    // ---------- P0-04: явное сохранение перед Next/Finish ----------
+
+    [Fact]
+    public async Task SaveAnswer_ThenImmediateLock_AnswerPersists()
+    {
+        // «Ответ → сразу Далее» (клиент делает явный SaveNow перед lock-current):
+        // ревизия, подтверждённая до lock, не теряется.
+        var seed = await SeedAsync();
+        var client = await ExchangedClientAsync(seed.StudentCode);
+        var attemptId = await StartAttemptAsync(client, seed.Assignment.Id);
+        var sessionId = await CurrentSessionIdAsync(client, attemptId);
+
+        var save = await client.PutAsJsonAsync($"/api/attempts/{attemptId}/answers/{sessionId}",
+            new { answer = new { selectedOptionId = "a" } });
+        save.EnsureSuccessStatusCode();
+        Assert.Equal(1, (await BodyAsync(save)).GetProperty("acceptedRevision").GetInt32());
+
+        // Немедленный lock без повторного сохранения (клиент не ждёт debounce).
+        var lockResponse = await client.PostAsJsonAsync($"/api/attempts/{attemptId}/lock-current", new { });
+        lockResponse.EnsureSuccessStatusCode();
+
+        var state = await GetJsonAsync(client, $"/api/attempts/{attemptId}/state");
+        var locked = state.GetProperty("sessions")[0];
+        Assert.Equal(1, locked.GetProperty("revision").GetInt32());
+        Assert.Equal("Locked", locked.GetProperty("state").GetString());
+    }
+
+    [Fact]
+    public async Task Finish_ImmediatelyAfterSave_GradesSavedAnswer()
+    {
+        // «Ответ → сразу Завершить» без промежуточного lock-current:
+        // последняя подтверждённая ревизия учитывается при финальной оценке.
+        var seed = await SeedAsync();
+        var client = await ExchangedClientAsync(seed.StudentCode);
+        var attemptId = await StartAttemptAsync(client, seed.Assignment.Id);
+        var sessionId = await CurrentSessionIdAsync(client, attemptId);
+
+        var save = await client.PutAsJsonAsync($"/api/attempts/{attemptId}/answers/{sessionId}",
+            new { answer = new { selectedOptionId = "a" } });
+        save.EnsureSuccessStatusCode();
+
+        var finish = await client.PostAsJsonAsync($"/api/attempts/{attemptId}/finish", new { });
+        finish.EnsureSuccessStatusCode();
+        var finished = await BodyAsync(finish);
+        Assert.Equal("Finalized", finished.GetProperty("status").GetString());
+        // Один вопрос из трёх отвечен верно (1 из 6) — именно сохранённая ревизия учтена.
+        Assert.Equal(1m, finished.GetProperty("earnedPoints").GetDecimal());
+    }
 }

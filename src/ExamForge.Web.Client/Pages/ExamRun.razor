@@ -115,7 +115,7 @@ else if (_state is not null)
     private DateTimeOffset? _deadlineUtc;
     private string? _flowError;
     private System.Timers.Timer? _uiTimer;
-    private int _saveGeneration;
+    private CancellationTokenSource? _debounceCts;
     private SaveState _saveState = SaveState.Idle;
     private int _acceptedRevision;
     private bool _confirmFinish;
@@ -203,6 +203,7 @@ else if (_state is not null)
 
     private async Task OpenNextAsync()
     {
+        if (_busy) return; // double click не создаёт параллельных переходов
         _busy = true;
         _flowError = null;
         try
@@ -220,12 +221,22 @@ else if (_state is not null)
 
     private async Task NextAsync()
     {
+        if (_busy) return; // double click не создаёт параллельных переходов
         _busy = true;
         _flowError = null;
         try
         {
+            // P0-04: Next всегда сначала явно сохраняет текущий ответ.
             if (!_expired)
-                await SaveNowAsync();
+            {
+                var save = await SaveNowAsync();
+                if (!ExamSaveGate.CanProceed(save))
+                {
+                    // Ошибка сохранения: вопрос не закрывается, пользователь видит причину.
+                    _flowError = ExamSaveGate.GetMessage(save);
+                    return;
+                }
+            }
             await Api.LockCurrentAsync(AttemptId);
             _state = await Api.OpenNextAsync(AttemptId);
             _expired = false;
@@ -260,9 +271,25 @@ else if (_state is not null)
 
     private async Task FinishAsync()
     {
+        if (_busy) return; // double click не завершает попытку дважды
         _busy = true;
+        _flowError = null;
         try
         {
+            // P0-04: Finish всегда сначала явно сохраняет текущий ответ.
+            if (!_expired && _current is not null)
+            {
+                if (_editor is not null)
+                {
+                    var save = await SaveNowAsync();
+                    if (!ExamSaveGate.CanProceed(save))
+                    {
+                        // Попытка не завершается автоматически: пользователь получит понятное сообщение.
+                        _flowError = ExamSaveGate.GetMessage(save);
+                        return;
+                    }
+                }
+            }
             await Api.FinishAsync(AttemptId);
             _result = await Api.GetResultAsync(AttemptId);
             _state = null;
@@ -282,39 +309,63 @@ else if (_state is not null)
     {
         if (_current is null || _expired)
             return;
-        var generation = ++_saveGeneration;
+        // Новый ввод заменяет ожидающий debounce; отмена через CTS (P0-04: debounce
+        // не должен сработать после явного сохранения и перезаписать его результат).
+        _debounceCts?.Cancel();
+        _debounceCts?.Dispose();
+        _debounceCts = new CancellationTokenSource();
+        var token = _debounceCts.Token;
         _saveState = SaveState.Saving;
-        await Task.Delay(500);
-        if (generation != _saveGeneration)
-            return;
-        await SaveNowAsync(generation);
+        try
+        {
+            await Task.Delay(500, token);
+            await SaveNowAsync();
+        }
+        catch (OperationCanceledException)
+        {
+            // заменён новым вводом или отменён явным SaveNow — это норма
+        }
     }
 
-    private async Task SaveNowAsync(int? generation = null)
+    /// <summary>
+    /// Явное сохранение с результатом (P0-04): вызывающий код знает об успехе и
+    /// может заблокировать переход. Ошибки не «глотаются» молча, состояние отражается в UI.
+    /// </summary>
+    private async Task<SaveAnswerResult> SaveNowAsync()
     {
+        // Отменяем ожидающий debounce: явное сохранение — источник истины.
+        _debounceCts?.Cancel();
+        _debounceCts?.Dispose();
+        _debounceCts = null;
+
         if (_current is null || _editor is null)
-            return;
+            return SaveAnswerResult.Saved; // нечего сохранять
         try
         {
             var result = await Api.SaveAnswerAsync(AttemptId, _current.QuestionSessionId, _editor.BuildAnswer());
-            if (generation is null || generation == _saveGeneration)
-            {
-                _acceptedRevision = result.AcceptedRevision ?? _acceptedRevision;
-                _saveState = SaveState.Saved;
-            }
+            _acceptedRevision = result.AcceptedRevision ?? _acceptedRevision;
+            _saveState = SaveState.Saved;
+            return SaveAnswerResult.Saved;
         }
         catch (ExamApiException ex) when (ex.IsRejectedLate)
         {
             _saveState = SaveState.RejectedLate;
             _expired = true;
+            return SaveAnswerResult.RejectedLate;
         }
         catch (Exception)
         {
             _saveState = SaveState.Offline; // локальная запись ≠ принятая сервером (ТЗ §10.3)
+            return SaveAnswerResult.Offline;
         }
     }
 
     private void StopTimer() { _uiTimer?.Dispose(); _uiTimer = null; }
 
-    public void Dispose() => StopTimer();
+    public void Dispose()
+    {
+        StopTimer();
+        _debounceCts?.Dispose();
+        _debounceCts = null;
+    }
 }
