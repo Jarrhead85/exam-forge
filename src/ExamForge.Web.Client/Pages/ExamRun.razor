@@ -39,7 +39,7 @@ else if (_state is not null)
 {
     <div class="ef-exam-statusbar">
         <span class="ef-badge">Вопрос @(_current is null ? 0 : _current.OrderIndex + 1) из @_state.TotalQuestions</span>
-        @if (_remaining is { } remaining && !_expired)
+        @if (Remaining is { } remaining && !_expired)
         {
             <span class="ef-badge @(remaining.TotalSeconds <= 10 ? "ef-badge--warning" : "")">@($"{(int)remaining.TotalMinutes:00}:{remaining.Seconds:00}")</span>
         }
@@ -110,9 +110,10 @@ else if (_state is not null)
     private AttemptStateDto? _state;
     private StudentQuestionDto? _current;
     private StudentResultDto? _result;
-    private TimeSpan? _remaining;
+    // P0-03: остаток отображается пересчётом из серверного DeadlineUtc на каждый тик,
+    // ничего не накапливается (см. ExamCountdown).
+    private DateTimeOffset? _deadlineUtc;
     private string? _flowError;
-    private DateTimeOffset _receivedAtUtc;
     private System.Timers.Timer? _uiTimer;
     private int _saveGeneration;
     private SaveState _saveState = SaveState.Idle;
@@ -120,6 +121,8 @@ else if (_state is not null)
     private bool _confirmFinish;
 
     private bool InputDisabled => _expired;
+
+    private TimeSpan? Remaining => ExamCountdown.Remaining(_deadlineUtc, DateTimeOffset.UtcNow);
 
     private string SaveStateLabel => _saveState switch
     {
@@ -170,13 +173,12 @@ else if (_state is not null)
             _expired = false;
             _saveState = active.Revision > 0 ? SaveState.Saved : SaveState.Idle;
             // Клиентский счётчик — только визуализация (ТЗ §10.1); срок владеет сервер.
-            _remaining = active.DeadlineUtc - DateTimeOffset.UtcNow;
+            _deadlineUtc = active.DeadlineUtc;
         }
         else
         {
-            _remaining = null;
+            _deadlineUtc = null;
         }
-        _receivedAtUtc = DateTimeOffset.UtcNow;
         StartTimer();
     }
 
@@ -190,18 +192,11 @@ else if (_state is not null)
 
     private void Tick()
     {
-        if (_remaining is { } remaining)
+        if (_deadlineUtc is not null)
         {
-            var adjusted = remaining - (DateTimeOffset.UtcNow - _receivedAtUtc);
-            if (adjusted <= TimeSpan.Zero && !_expired)
-            {
+            var remaining = ExamCountdown.Remaining(_deadlineUtc, DateTimeOffset.UtcNow);
+            if (remaining is { } r && r <= TimeSpan.Zero && !_expired)
                 _expired = true;
-                _remaining = TimeSpan.Zero;
-            }
-            else if (adjusted > TimeSpan.Zero)
-            {
-                _remaining = adjusted;
-            }
         }
         StateHasChanged();
     }
