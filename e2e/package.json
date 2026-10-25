@@ -1,0 +1,13 @@
+{
+  "name": "examforge-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "description": "E2E-пакет Exam Forge (Playwright, P0-10): сквозные UI-сценарии против работающего сайта.",
+  "scripts": {
+    "test": "playwright test",
+    "seed": "dotnet run --project ../src/ExamForge.Web --no-build -- --seed-e2e .state/seed.json"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.50.0"
+  }
+}

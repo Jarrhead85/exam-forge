@@ -179,6 +179,11 @@ if (args.Length >= 1)
         await DemoSeeder.SeedAsync(app.Services);
         return;
     }
+    if (args.Length == 2 && args[0] == "--seed-e2e")
+    {
+        await ExamForge.Web.E2ESeeder.SeedAsync(app.Services, args[1]);
+        return;
+    }
 }
 
 if (app.Environment.IsDevelopment())
