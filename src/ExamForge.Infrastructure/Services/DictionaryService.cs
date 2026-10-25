@@ -27,9 +27,58 @@ public sealed class DictionaryService(ExamForgeDbContext db, TimeProvider timePr
 {
     private DateTimeOffset Now => timeProvider.GetUtcNow();
 
+    // ---------- Authorization (P0-08): единая политика, проверяется на сервере ----------
+
+    private enum DictionaryAccess { None, Read, Edit }
+
+    /// <summary>
+    /// Владелец/администратор — Edit. Legacy-словари (OwnerTeacherId == Guid.Empty)
+    /// сохраняют прежнее общедоступное поведение. SharedEdit — Edit только по явному
+    /// DictionaryGrant. SharedRead — только чтение/использование. Private — посторонним нет.
+    /// </summary>
+    private async Task<DictionaryAccess> ResolveAccessAsync(Dictionary dictionary, TeacherActor actor, CancellationToken ct)
+    {
+        if (actor.IsAdministrator || dictionary.OwnerTeacherId == actor.TeacherId)
+            return DictionaryAccess.Edit;
+        if (dictionary.OwnerTeacherId == Guid.Empty)
+            return DictionaryAccess.Edit; // legacy: до внедрения владения словари были общими
+        if (dictionary.Mode == Dictionary.AccessMode.SharedEdit)
+        {
+            var granted = await db.DictionaryGrants.AsNoTracking()
+                .AnyAsync(g => g.DictionaryId == dictionary.Id && g.TeacherId == actor.TeacherId, ct);
+            if (granted)
+                return DictionaryAccess.Edit;
+        }
+        return dictionary.Mode switch
+        {
+            Dictionary.AccessMode.Private => DictionaryAccess.None,
+            _ => DictionaryAccess.Read,
+        };
+    }
+
+    private async Task<Dictionary> LoadDictionaryAsync(Guid dictionaryId, TeacherActor actor, DictionaryAccess required, CancellationToken ct)
+    {
+        var dictionary = await db.Dictionaries.AsNoTracking()
+            .SingleOrDefaultAsync(d => d.Id == dictionaryId, ct)
+            ?? throw TeacherFlowErrors.NotFound("Словарь не найден.");
+        var access = await ResolveAccessAsync(dictionary, actor, ct);
+        if (access < required)
+            throw TeacherFlowErrors.NotFound("Словарь не найден."); // чужой/недоступный неотличим (ТЗ §3.3)
+        return dictionary;
+    }
+
+    private async Task<DictionaryEntry> LoadEntryWithAccessAsync(Guid entryId, TeacherActor actor, DictionaryAccess required, CancellationToken ct)
+    {
+        var entry = await db.DictionaryEntries.AsNoTracking()
+            .SingleOrDefaultAsync(e => e.Id == entryId, ct)
+            ?? throw TeacherFlowErrors.NotFound("Запись не найдена.");
+        await LoadDictionaryAsync(entry.DictionaryId, actor, required, ct);
+        return entry;
+    }
+
     public async Task<Dictionary> CreateAsync(TeacherActor actor, Guid subjectId, string name, CancellationToken ct)
     {
-        var dictionary = Dictionary.Create(subjectId, name, Now);
+        var dictionary = Dictionary.Create(subjectId, name, Now, actor.TeacherId);
         db.Dictionaries.Add(dictionary);
         await db.SaveChangesAsync(ct);
         return dictionary;
@@ -37,9 +86,9 @@ public sealed class DictionaryService(ExamForgeDbContext db, TimeProvider timePr
 
     public async Task RenameAsync(TeacherActor actor, Guid dictionaryId, string name, CancellationToken ct)
     {
-        var dictionary = await db.Dictionaries.SingleOrDefaultAsync(d => d.Id == dictionaryId, ct)
-            ?? throw TeacherFlowErrors.NotFound("Словарь не найден.");
-        dictionary.Rename(name);
+        var dictionary = await LoadDictionaryAsync(dictionaryId, actor, DictionaryAccess.Edit, ct);
+        var tracked = await db.Dictionaries.SingleAsync(d => d.Id == dictionaryId, ct);
+        tracked.Rename(name);
         await db.SaveChangesAsync(ct);
     }
 
@@ -49,8 +98,8 @@ public sealed class DictionaryService(ExamForgeDbContext db, TimeProvider timePr
     /// </summary>
     public async Task<int> DeleteAsync(TeacherActor actor, Guid dictionaryId, CancellationToken ct)
     {
-        var dictionary = await db.Dictionaries.SingleOrDefaultAsync(d => d.Id == dictionaryId, ct)
-            ?? throw TeacherFlowErrors.NotFound("Словарь не найден.");
+        await LoadDictionaryAsync(dictionaryId, actor, DictionaryAccess.Edit, ct);
+        var dictionary = await db.Dictionaries.SingleAsync(d => d.Id == dictionaryId, ct);
         var entries = await db.DictionaryEntries.Where(e => e.DictionaryId == dictionaryId).ToListAsync(ct);
         db.DictionaryEntries.RemoveRange(entries);
         db.Dictionaries.Remove(dictionary);
@@ -61,9 +110,9 @@ public sealed class DictionaryService(ExamForgeDbContext db, TimeProvider timePr
     /// <summary>Удаление отдельной записи: решение преподавателя (черновик/отклонённая/подтверждённая).</summary>
     public async Task DeleteEntryAsync(TeacherActor actor, Guid entryId, CancellationToken ct)
     {
-        var entry = await db.DictionaryEntries.SingleOrDefaultAsync(e => e.Id == entryId, ct)
-            ?? throw TeacherFlowErrors.NotFound("Запись не найдена.");
-        db.DictionaryEntries.Remove(entry);
+        var entry = await LoadEntryWithAccessAsync(entryId, actor, DictionaryAccess.Edit, ct);
+        var tracked = await db.DictionaryEntries.SingleAsync(e => e.Id == entry.Id, ct);
+        db.DictionaryEntries.Remove(tracked);
         await db.SaveChangesAsync(ct);
     }
 
@@ -76,9 +125,7 @@ public sealed class DictionaryService(ExamForgeDbContext db, TimeProvider timePr
         string lemma, string translation, string? formKind, string? gender, string? declension,
         CancellationToken ct)
     {
-        var dictionary = await db.Dictionaries.AsNoTracking()
-            .SingleOrDefaultAsync(d => d.Id == dictionaryId, ct)
-            ?? throw TeacherFlowErrors.NotFound("Словарь не найден.");
+        await LoadDictionaryAsync(dictionaryId, actor, DictionaryAccess.Edit, ct);
         lemma = lemma.Trim();
         translation = translation.Trim();
         if (lemma.Length == 0 || translation.Length == 0)
@@ -97,9 +144,25 @@ public sealed class DictionaryService(ExamForgeDbContext db, TimeProvider timePr
         return entry;
     }
 
-    public async Task<IReadOnlyList<DictionaryDto>> ListAsync(CancellationToken ct)
+    /// <summary>Доступные текущему преподавателю словари (P0-08): свои, администратор видит все,
+    /// legacy — общие, SharedRead/SharedEdit — доступны для чтения, Private чужой — скрыт.</summary>
+    public async Task<IReadOnlyList<DictionaryDto>> ListAsync(TeacherActor actor, CancellationToken ct)
     {
-        var dictionaries = await db.Dictionaries.AsNoTracking().OrderBy(d => d.Name).ToListAsync(ct);
+        var teacherId = actor.TeacherId;
+        var granteds = await db.DictionaryGrants.AsNoTracking()
+            .Where(g => g.TeacherId == teacherId)
+            .Select(g => g.DictionaryId)
+            .ToListAsync(ct);
+        var queryable = db.Dictionaries.AsNoTracking();
+        if (!actor.IsAdministrator)
+        {
+            queryable = queryable.Where(d =>
+                d.OwnerTeacherId == Guid.Empty                    // legacy: общие
+                || d.OwnerTeacherId == teacherId                  // свои
+                || d.Mode != Dictionary.AccessMode.Private        // разданные на чтение/правку
+                || granteds.Contains(d.Id));                      // явно допущенные к правке
+        }
+        var dictionaries = await queryable.OrderBy(d => d.Name).ToListAsync(ct);
         var ids = dictionaries.Select(d => d.Id).ToList();
         var counts = await db.DictionaryEntries.AsNoTracking()
             .Where(e => ids.Contains(e.DictionaryId) && e.Status != DictionaryEntryStatus.Rejected)
@@ -109,8 +172,11 @@ public sealed class DictionaryService(ExamForgeDbContext db, TimeProvider timePr
         return [.. dictionaries.Select(d => new DictionaryDto(d.Id, d.Name, counts.GetValueOrDefault(d.Id), d.CreatedAtUtc))];
     }
 
-    public async Task<IReadOnlyList<DictionaryEntryDto>> EntriesAsync(Guid dictionaryId, CancellationToken ct)
+    public async Task<IReadOnlyList<DictionaryEntryDto>> EntriesAsync(
+        TeacherActor actor, Guid dictionaryId, CancellationToken ct)
     {
+        // SharedRead разрешает использование содержимого (чтение, черновик вопроса).
+        await LoadDictionaryAsync(dictionaryId, actor, DictionaryAccess.Read, ct);
         var entries = await db.DictionaryEntries.AsNoTracking()
             .Where(e => e.DictionaryId == dictionaryId)
             .OrderBy(e => e.Lemma)
@@ -125,9 +191,8 @@ public sealed class DictionaryService(ExamForgeDbContext db, TimeProvider timePr
     public async Task<(int Imported, int Skipped)> ImportPdfAsync(
         TeacherActor actor, Guid dictionaryId, Stream pdfContent, CancellationToken ct)
     {
-        var dictionary = await db.Dictionaries.AsNoTracking()
-            .SingleOrDefaultAsync(d => d.Id == dictionaryId, ct)
-            ?? throw TeacherFlowErrors.NotFound("Словарь не найден.");
+        // Правка словаря (импорт создаёт черновики) — только владелец/админ/явный грант (P0-08).
+        await LoadDictionaryAsync(dictionaryId, actor, DictionaryAccess.Edit, ct);
 
         // Поток из браузерной загрузки (IBrowserFile.OpenReadStream) поддерживает только
         // асинхронное чтение, а PdfPig читает синхронно — буферизуем файл целиком
@@ -199,39 +264,43 @@ public sealed class DictionaryService(ExamForgeDbContext db, TimeProvider timePr
         TeacherActor actor, Guid entryId, string? formKind, string? gender, string? declension, string? grammaticalCase,
         IReadOnlyList<string> translations, CancellationToken ct)
     {
-        var entry = await db.DictionaryEntries.SingleOrDefaultAsync(e => e.Id == entryId, ct)
-            ?? throw TeacherFlowErrors.NotFound("Запись не найдена.");
+        // Подтверждение — правка содержимого словаря: только Edit (P0-08).
+        var entry = await LoadEntryWithAccessAsync(entryId, actor, DictionaryAccess.Edit, ct);
+        var tracked = await db.DictionaryEntries.SingleAsync(e => e.Id == entry.Id, ct);
         var features = formKind is null && gender is null && declension is null && grammaticalCase is null
             ? null
             : new GrammaticalFeatures { FormKind = formKind, Gender = gender, Declension = declension, GrammaticalCase = grammaticalCase };
-        entry.Confirm(features, translations, Now);
+        tracked.Confirm(features, translations, Now);
         await db.SaveChangesAsync(ct);
-        return ToDto(entry);
+        return ToDto(tracked);
     }
 
     public async Task RejectAsync(TeacherActor actor, Guid entryId, CancellationToken ct)
     {
-        var entry = await db.DictionaryEntries.SingleOrDefaultAsync(e => e.Id == entryId, ct)
-            ?? throw TeacherFlowErrors.NotFound("Запись не найдена.");
-        entry.Reject(Now);
+        var entry = await LoadEntryWithAccessAsync(entryId, actor, DictionaryAccess.Edit, ct);
+        var tracked = await db.DictionaryEntries.SingleAsync(e => e.Id == entry.Id, ct);
+        tracked.Reject(Now);
         await db.SaveChangesAsync(ct);
     }
 
-    public async Task<DictionaryEntry> LoadEntryAsync(Guid entryId, CancellationToken ct)
-        => await db.DictionaryEntries.AsNoTracking().SingleOrDefaultAsync(e => e.Id == entryId, ct)
-           ?? throw TeacherFlowErrors.NotFound("Запись не найдена.");
+    public async Task<DictionaryEntry> LoadEntryAsync(TeacherActor actor, Guid entryId, CancellationToken ct)
+    {
+        var entry = await LoadEntryWithAccessAsync(entryId, actor, DictionaryAccess.Read, ct);
+        return await db.DictionaryEntries.AsNoTracking().SingleAsync(e => e.Id == entry.Id, ct);
+    }
 
-    public async Task<Guid> LoadDictionarySubjectAsync(Guid dictionaryId, CancellationToken ct)
-        => await db.Dictionaries.AsNoTracking()
-            .Where(d => d.Id == dictionaryId)
-            .Select(d => d.SubjectId)
-            .SingleAsync(ct);
+    public async Task<Guid> LoadDictionarySubjectAsync(TeacherActor actor, Guid dictionaryId, CancellationToken ct)
+    {
+        var dictionary = await LoadDictionaryAsync(dictionaryId, actor, DictionaryAccess.Read, ct);
+        return dictionary.SubjectId;
+    }
 
     /// <summary>Черновик вопроса из подтверждённой записи + дистракторы из соседних записей (ТЗ §6).</summary>
     public async Task<Guid> CreateDraftQuestionAsync(TeacherActor actor, Guid entryId, CancellationToken ct)
     {
-        var entry = await LoadEntryAsync(entryId, ct);
-        var others = await EntriesAsync(entry.DictionaryId, ct);
+        // Использование записи словаря для создания своего вопроса — Read (общий доступ), P0-08.
+        var entry = await LoadEntryAsync(actor, entryId, ct);
+        var others = await EntriesAsync(actor, entry.DictionaryId, ct);
         var distractors = others
             .Where(o => o.EntryId != entryId && o.Translations.Count > 0)
             .Select(o => o.Translations[0])
@@ -239,7 +308,7 @@ public sealed class DictionaryService(ExamForgeDbContext db, TimeProvider timePr
             .Take(6)
             .ToList();
         var definition = Domain.Questions.DictionaryDraftFactory.BuildTranslationChoice(entry, distractors, 40);
-        var subjectId = await LoadDictionarySubjectAsync(entry.DictionaryId, ct);
+        var subjectId = await LoadDictionarySubjectAsync(actor, entry.DictionaryId, ct);
         var version = await new TeacherQuestionsService(db, timeProvider)
             .CreateDraftAsync(actor, subjectId, definition, ct);
         return version.QuestionId;

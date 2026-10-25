@@ -37,7 +37,7 @@ public sealed class StartupWarmupService(IServiceProvider services, ILogger<Star
             await WarmAsync("teachers", () => admins.ListTeachersAsync(actor, stoppingToken), failures);
             await WarmAsync("subjects", () => scope.ServiceProvider.GetRequiredService<SubjectsService>().ListAsync(stoppingToken), failures);
             await WarmAsync("groups", () => scope.ServiceProvider.GetRequiredService<GroupService>().ListAsync(actor, stoppingToken), failures);
-            await WarmAsync("dictionaries", () => scope.ServiceProvider.GetRequiredService<DictionaryService>().ListAsync(stoppingToken), failures);
+            await WarmAsync("dictionaries", () => scope.ServiceProvider.GetRequiredService<DictionaryService>().ListAsync(actor, stoppingToken), failures);
             await WarmAsync("questions", () => scope.ServiceProvider.GetRequiredService<TeacherQuestionsService>().ListAsync(actor, stoppingToken), failures);
             await WarmAsync("tests", () => TeacherTestsService.ListAsync(db, actor, stoppingToken), failures);
             await WarmAsync("assignments", () => scope.ServiceProvider.GetRequiredService<TeacherAssignmentsService>().ListAssignmentsAsync(actor, stoppingToken), failures);

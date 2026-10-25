@@ -102,17 +102,72 @@ public sealed class DictionaryEntry
 
 public sealed class Dictionary
 {
+    /// <summary>
+    /// Модель владения словарём (P0-08): Private — видит и правит только владелец/ админ;
+    /// SharedRead — читать и использовать (черновик вопроса) могут все, править нет;
+    /// SharedEdit — править могут только явно допущенные (DictionaryGrant), читать — все.
+    /// Словари до внедрения модели (OwnerTeacherId == Guid.Empty) сохраняют прежнее
+    /// общедоступное поведение — это явное legacy-решение, а не дыра.
+    /// </summary>
+    public enum AccessMode
+    {
+        Private = 1,
+        SharedRead = 2,
+        SharedEdit = 3,
+    }
+
     public Guid Id { get; private set; } = Guid.NewGuid();
     public Guid SubjectId { get; private set; }
     public string Name { get; private set; } = string.Empty;
     public DateTimeOffset CreatedAtUtc { get; private set; }
+    /// <summary>Guid.Empty — серверные/legacy словари (до внедрения владения).</summary>
+    public Guid OwnerTeacherId { get; private set; }
+    public AccessMode Mode { get; private set; } = AccessMode.Private;
 
     private Dictionary() { }
 
+    public static Dictionary Create(Guid subjectId, string name, DateTimeOffset nowUtc, Guid ownerTeacherId)
+    {
+        Guard.Required(name, "Название словаря", 200);
+        // Владельцем может быть и пустой Guid — только для server-side/seed (см. Create без owner).
+        return new Dictionary
+        {
+            SubjectId = subjectId,
+            Name = name,
+            CreatedAtUtc = nowUtc,
+            OwnerTeacherId = ownerTeacherId,
+            Mode = AccessMode.Private,
+        };
+    }
+
+    /// <summary>Совместимость: server-side/seed создание без владельца (legacy-социализация).</summary>
     public static Dictionary Create(Guid subjectId, string name, DateTimeOffset nowUtc)
-        => new() { SubjectId = subjectId, Name = Guard.Required(name, "Название словаря", 200), CreatedAtUtc = nowUtc };
+        => Create(subjectId, name, nowUtc, Guid.Empty);
 
     public void Rename(string name) => Name = Guard.Required(name, "Название словаря", 200);
+
+    public void SetAccessMode(AccessMode mode) => Mode = mode;
+}
+
+/// <summary>Явное допущение преподавателя к редактированию словаря в режиме SharedEdit (P0-08).</summary>
+public sealed class DictionaryGrant
+{
+    public Guid Id { get; private set; } = Guid.NewGuid();
+    public Guid DictionaryId { get; private set; }
+    public Guid TeacherId { get; private set; }
+    public Guid GrantedByTeacherId { get; private set; }
+    public DateTimeOffset GrantedAtUtc { get; private set; }
+
+    private DictionaryGrant() { }
+
+    public static DictionaryGrant Create(Guid dictionaryId, Guid teacherId, Guid grantedBy, DateTimeOffset nowUtc)
+        => new()
+        {
+            DictionaryId = dictionaryId,
+            TeacherId = teacherId,
+            GrantedByTeacherId = grantedBy,
+            GrantedAtUtc = nowUtc,
+        };
 }
 
 /// <summary>Фоновое извлечение текста PDF с таблицей предварительных записей (ТЗ §6).</summary>

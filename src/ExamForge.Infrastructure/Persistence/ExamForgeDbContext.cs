@@ -30,6 +30,7 @@ public sealed class ExamForgeDbContext(DbContextOptions<ExamForgeDbContext> opti
     public DbSet<QuestionVersion> QuestionVersions => Set<QuestionVersion>();
     public DbSet<Dictionary> Dictionaries => Set<Dictionary>();
     public DbSet<DictionaryEntry> DictionaryEntries => Set<DictionaryEntry>();
+    public DbSet<DictionaryGrant> DictionaryGrants => Set<DictionaryGrant>();
     public DbSet<ImportJob> ImportJobs => Set<ImportJob>();
     public DbSet<Test> Tests => Set<Test>();
     public DbSet<TestVersion> TestVersions => Set<TestVersion>();
@@ -220,7 +221,23 @@ public sealed class DictionaryConfiguration : IEntityTypeConfiguration<Dictionar
         builder.ToTable("dictionaries");
         builder.HasKey(d => d.Id);
         builder.Property(d => d.Name).HasMaxLength(200);
+        // P0-08: владение и режим доступа; Guid.Empty = legacy/общие словари (навигации нет).
+        builder.Property(d => d.OwnerTeacherId);
+        builder.Property(d => d.Mode).HasConversion<int>();
         builder.HasOne<Subject>().WithMany().HasForeignKey(d => d.SubjectId);
+        builder.HasIndex(d => d.OwnerTeacherId);
+        builder.HasIndex(d => d.Mode);
+    }
+}
+
+public sealed class DictionaryGrantConfiguration : IEntityTypeConfiguration<DictionaryGrant>
+{
+    public void Configure(EntityTypeBuilder<DictionaryGrant> builder)
+    {
+        builder.ToTable("dictionary_grants");
+        builder.HasKey(g => g.Id);
+        builder.HasOne<Dictionary>().WithMany().HasForeignKey(g => g.DictionaryId);
+        builder.HasIndex(g => new { g.DictionaryId, g.TeacherId }).IsUnique(); // одно допущение на преподавателя
     }
 }
 
