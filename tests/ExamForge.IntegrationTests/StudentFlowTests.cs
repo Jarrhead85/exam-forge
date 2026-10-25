@@ -573,6 +573,41 @@ public sealed class StudentFlowTests(ExamForgeWebFactory factory)
         Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
     }
 
+    // ---------- P0-07: гонка параллельных Start ----------
+
+    [Fact]
+    public async Task TenParallelStarts_SingleActiveAttempt_AllGetSameAttempt()
+    {
+        // 10 параллельных start одного студента: ровно одна активная попытка,
+        // все запросы получают один и тот же attemptId без 500 (P0-07).
+        var seed = await SeedAsync();
+        var client = await ExchangedClientAsync(seed.StudentCode);
+
+        var starts = await Task.WhenAll(Enumerable.Range(0, 10)
+            .Select(_ => client.PostAsync($"/api/assignments/{seed.Assignment.Id}/attempts",
+                JsonContent.Create(new { }, options: Json))));
+        foreach (var start in starts.AsSpan())
+            Assert.True(start.IsSuccessStatusCode, $"start → {(int)start.StatusCode}");
+
+        var attemptIds = await Task.WhenAll(starts.Select(async s =>
+        {
+            var body = await s.Content.ReadFromJsonAsync<JsonElement>(Json);
+            return body.GetProperty("attemptId").GetGuid();
+        }));
+        Assert.All(attemptIds, id => Assert.Equal(attemptIds[0], id));
+
+        await using var db = NewDb();
+        var attempts = await db.Attempts.AsNoTracking()
+            .Where(a => a.AssignmentId == seed.Assignment.Id && a.StudentProfileId == seed.Student.Id)
+            .ToListAsync();
+        var active = attempts.Where(a => a.State is AttemptState.Created or AttemptState.InProgress).ToList();
+        Assert.Single(active);
+        Assert.Single(attempts); // вторая попытка после отката первого финиша не создавалась
+        var sessions = await db.QuestionSessions.AsNoTracking()
+            .Where(s => s.AttemptId == attemptIds[0]).ToListAsync();
+        Assert.Equal(3, sessions.Count); // Attempt + QuestionSessions атомарно (P0-07)
+    }
+
     // ---------- P0-04: явное сохранение перед Next/Finish ----------
 
     [Fact]

@@ -138,31 +138,58 @@ public sealed class StudentFlowService(ExamForgeDbContext db, TimeProvider timeP
                 throw StudentFlowException.Conflict("attempts_exhausted",
                     "Лимит попыток исчерпан. Дополнительную попытку выдаёт преподаватель.");
 
-            var attempt = await CreateAttemptAsync(assignment, testVersion, profileId, usedCount + 1, grant.Id, who.GroupName, ct);
-            grant.MarkUsed(attempt.Id);
-            await db.SaveChangesAsync(ct);
-            return await BuildStateAsync(attempt, ct);
+            var granted = await BuildNewAttemptAsync(assignment, testVersion, profileId, usedCount + 1, grant.Id, who.GroupName, ct);
+            grant.MarkUsed(granted.Id);
+            try
+            {
+                await db.SaveChangesAsync(ct); // attempt + sessions + grant атомарно (P0-07)
+            }
+            catch (DbUpdateException ex) when (IsUniqueActiveViolation(ex))
+            {
+                return await AdoptWinnerStateAsync(assignment, profileId, now, ct);
+            }
+            return await BuildStateAsync(granted, ct);
         }
 
-        var created = await CreateAttemptAsync(assignment, testVersion, profileId, usedCount + 1, null, who.GroupName, ct);
+        var created = await BuildNewAttemptAsync(assignment, testVersion, profileId, usedCount + 1, null, who.GroupName, ct);
         try
         {
+            // P0-07: Attempt и QuestionSessions создаются одним SaveChanges (одна транзакция),
+            // unique violation ловится только здесь — больше нет промежуточных сохранений
+            // до try/catch, из-за которых посторонний 500 «протекал» наружу.
             await db.SaveChangesAsync(ct);
         }
-        catch (DbUpdateException)
+        catch (DbUpdateException ex) when (IsUniqueActiveViolation(ex))
         {
-            // Гонка двух start: уникальный индекс активной попытки — возвращаем существующую.
-            db.Entry(created).State = EntityState.Detached;
-            var winner = await db.Attempts.AsNoTracking().FirstAsync(
-                a => a.AssignmentId == assignmentId && a.StudentProfileId == profileId
-                     && (a.State == AttemptState.Created || a.State == AttemptState.InProgress), ct);
-            var tracked = await db.Attempts.FirstAsync(a => a.Id == winner.Id, ct);
-            return await BuildStateAsync(tracked, ct);
+            return await AdoptWinnerStateAsync(assignment, profileId, now, ct);
         }
         return await BuildStateAsync(created, ct);
     }
 
-    private async Task<Attempt> CreateAttemptAsync(
+    /// <summary>Ожидаемая гонка двух start (PostgreSQL 23505 + ix_attempts_unique_active);
+    /// остальные DbUpdateException — genuine ошибки и не «глотаются».</summary>
+    private static bool IsUniqueActiveViolation(DbUpdateException ex)
+        => ex.InnerException is Npgsql.PostgresException pg
+            && pg.SqlState == Npgsql.PostgresErrorCodes.UniqueViolation
+            && string.Equals(pg.ConstraintName, "ix_attempts_unique_active", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Другой запрос выиграл гонку: продолжаем с его попыткой (AC-07), без 500 и без
+    /// второй активной попытки. Start идемпотентен (Created → InProgress).</summary>
+    private async Task<AttemptStateDto> AdoptWinnerStateAsync(
+        Assignment assignment, Guid profileId, DateTimeOffset now, CancellationToken ct)
+    {
+        db.ChangeTracker.Clear(); // изменения проигравшего запроса отброшены
+        var winner = await db.Attempts.FirstAsync(
+            a => a.AssignmentId == assignment.Id && a.StudentProfileId == profileId
+                 && (a.State == AttemptState.Created || a.State == AttemptState.InProgress), ct);
+        winner.Start(now, Seconds(assignment.AttemptTotalTimeLimitSeconds));
+        await db.SaveChangesAsync(ct);
+        return await BuildStateAsync(winner, ct);
+    }
+
+    /// <summary>Формирует Attempt + QuestionSessions в памяти БЕЗ SaveChanges (P0-07):
+    /// сохранение выполняет вызывающий код одним атомарным SaveChangesAsync.</summary>
+    private async Task<Attempt> BuildNewAttemptAsync(
         Assignment assignment, TestVersion testVersion, Guid profileId, int number, Guid? grantId,
         string? groupSnapshot, CancellationToken ct)
     {
@@ -173,8 +200,10 @@ public sealed class StudentFlowService(ExamForgeDbContext db, TimeProvider timeP
             assignment.Id, number, Now, profileId, NameOf(profile), groupSnapshot, grantId, variant?.Id);
         attempt.Start(Now, Seconds(assignment.AttemptTotalTimeLimitSeconds));
         db.Attempts.Add(attempt);
-        await db.SaveChangesAsync(ct);
-        await EnsureSessionsAsync(attempt, testVersion, variant, ct);
+        // Порядок вопросов попытки — из зафиксированного варианта (ТЗ §8); без вариантов — порядок версии.
+        var order = 0;
+        foreach (var questionVersionId in variant?.QuestionOrder ?? testVersion.QuestionVersionIds)
+            db.QuestionSessions.Add(QuestionSession.Create(attempt.Id, questionVersionId, order++));
         return attempt;
     }
 
