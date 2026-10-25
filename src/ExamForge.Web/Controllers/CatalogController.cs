@@ -191,7 +191,7 @@ public sealed class CatalogController(
     {
         var actor = await ActorAsync();
         var details = await assignments.GetAssignmentAsync(actor, assignmentId, ct);
-        var bytes = results.GradebookXlsx(actor, assignmentId, details.Assignment.TestTitle, ct);
+        var bytes = await results.GradebookXlsxAsync(actor, assignmentId, details.Assignment.TestTitle, ct);
         return File(bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             $"gradebook-{assignmentId:N}.xlsx");
     }

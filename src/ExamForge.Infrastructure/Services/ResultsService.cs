@@ -21,8 +21,24 @@ public sealed record AssignmentStatsDto(
 /// </summary>
 public sealed class ResultsService(ExamForgeDbContext db)
 {
+    /// <summary>
+    /// Единая authorization-политика результатов (P0-06): назначение доступно автору
+    /// и администратору; чужое/несуществующее неотличимо (404) — IDOR-защита, проверка
+    /// server-side, UI не является механизмом безопасности.
+    /// </summary>
+    private async Task EnsureAssignmentAccessAsync(TeacherActor actor, Guid assignmentId, CancellationToken ct)
+    {
+        var owner = await db.Assignments.AsNoTracking()
+            .Where(a => a.Id == assignmentId)
+            .Select(a => a.CreatedByTeacherId)
+            .SingleOrDefaultAsync(ct);
+        if (owner == Guid.Empty || (!actor.IsAdministrator && owner != actor.TeacherId))
+            throw ExamForge.Application.StudentFlow.StudentFlowException.NotFound("Назначение не найдено.");
+    }
+
     public async Task<AssignmentStatsDto> StatsAsync(TeacherActor actor, Guid assignmentId, CancellationToken ct)
     {
+        await EnsureAssignmentAccessAsync(actor, assignmentId, ct);
         var invited = await db.Invitations.AsNoTracking()
             .CountAsync(i => i.AssignmentId == assignmentId, ct);
         var attempts = await db.Attempts.AsNoTracking()
@@ -42,12 +58,15 @@ public sealed class ResultsService(ExamForgeDbContext db)
             paper);
     }
 
-    public byte[] GradebookXlsx(TeacherActor actor, Guid assignmentId, string testTitle, CancellationToken ct)
+    public async Task<byte[]> GradebookXlsxAsync(TeacherActor actor, Guid assignmentId, string testTitle, CancellationToken ct)
     {
-        var attempts = db.Attempts.AsNoTracking()
+        // Единая authorization-политика результатов (P0-06): как и для stats.
+        await EnsureAssignmentAccessAsync(actor, assignmentId, ct);
+
+        var attempts = await db.Attempts.AsNoTracking()
             .Where(a => a.AssignmentId == assignmentId)
             .OrderBy(a => a.StudentNameSnapshot).ThenBy(a => a.AttemptNumber)
-            .ToList();
+            .ToListAsync(ct);
         var best = AttemptRules.SelectBest(attempts);
 
         using var workbook = new XLWorkbook();
@@ -79,9 +98,9 @@ public sealed class ResultsService(ExamForgeDbContext db)
             sheet.Cell(row, 9).Value = best?.Id == attempt.Id ? "да" : "";
             row++;
         }
-        var papers = db.PaperWorks.AsNoTracking()
+        var papers = await db.PaperWorks.AsNoTracking()
             .Where(w => w.AssignmentId == assignmentId)
-            .ToList();
+            .ToListAsync(ct);
         foreach (var work in papers)
         {
             sheet.Cell(row, 1).Value = work.StudentNameSnapshot;
