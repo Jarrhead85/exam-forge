@@ -33,15 +33,9 @@ builder.Services.AddExamForgeInfrastructure(
         ?? throw new InvalidOperationException("ConnectionStrings:Default не задан."));
 
 builder.Services.AddSingleton(TimeProvider.System);
-builder.Services.AddSingleton(_ =>
-{
-    // HMAC-ключ проверки кодов приглашений (ADR-002); в production задаётся конфигурацией/секретом.
-    var keyHex = builder.Configuration["ExamForge:InvitationHmacKey"];
-    var key = string.IsNullOrWhiteSpace(keyHex)
-        ? Convert.FromHexString("5F1D2A7C94E80B3FA6C5D2E147B0899ADF23C6E501B7A4D8F9E0C3B2A1D4F7E6")
-        : Convert.FromHexString(keyHex);
-    return new InvitationCodeHasher(key);
-});
+builder.Services.AddSingleton(sp => HmacKeySetup.Create(
+    builder.Configuration["ExamForge:InvitationHmacKey"],
+    builder.Environment.IsProduction()));
 builder.Services.AddScoped<StudentFlowService>();
 builder.Services.AddScoped<TeacherAssignmentsService>();
 builder.Services.AddScoped<TestVersionService>();
@@ -146,6 +140,10 @@ builder.Services.AddHostedService<ExamForge.Web.StartupWarmupService>();
 
 var app = builder.Build();
 var antiforgery = app.Services.GetRequiredService<IAntiforgery>();
+
+// Fail-fast: конфигурация HMAC-ключа проверяется на старте приложения, а не при первом
+// обмене кодом приглашения (иначе production с плохой настройкой поднимался бы «на вид»).
+_ = app.Services.GetRequiredService<InvitationCodeHasher>();
 
 // За reverse proxy (nginx/Caddy на том же узле): восстанавливаем схему и IP клиента
 // из X-Forwarded-Proto / X-Forwarded-For, иначе HttpsRedirection, cookie SecurePolicy
@@ -310,6 +308,44 @@ app.MapRazorComponents<App>()
 app.MapControllers();
 
 app.Run();
+
+/// <summary>
+/// HMAC-ключ кодов приглашений (ADR-002): production не запускается без явно заданного
+/// ключа; dev/Тестинг могут использовать явный fallback, закомментированный как таковой.
+/// Требование к ключу: 64 hex-символа = 32 байта, случайные (openssl rand -hex 32).
+/// </summary>
+internal static class HmacKeySetup
+{
+    public static InvitationCodeHasher Create(string? keyHex, bool isProduction)
+    {
+        if (string.IsNullOrWhiteSpace(keyHex))
+        {
+            if (isProduction)
+                throw new InvalidOperationException(
+                    "ExamForge:InvitationHmacKey не задан: production не может стартовать со встроенным fallback-ключом. " +
+                    "Задайте переменную окружения ExamForge__InvitationHmacKey: 64 hex-символа (32 байта), например `openssl rand -hex 32` (см. deploy/docker/env.example).");
+            // Специально помеченный dev-ключ: ТОЛЬКО вне production; у настоящих инстансов ключ
+            // свой — встроенный номер делал бы коды предсказуемыми.
+            keyHex = "5F1D2A7C94E80B3FA6C5D2E147B0899ADF23C6E501B7A4D8F9E0C3B2A1D4F7E6";
+        }
+
+        byte[] key;
+        try
+        {
+            key = Convert.FromHexString(keyHex);
+        }
+        catch (FormatException)
+        {
+            throw new InvalidOperationException("ExamForge:InvitationHmacKey должен быть hex-строкой без пробелов и посторонних символов.");
+        }
+
+        if (key.Length < 32)
+            throw new InvalidOperationException(
+                $"ExamForge:InvitationHmacKey должен быть не короче 32 байт (64 hex-символа); получено {key.Length} байт.");
+
+        return new InvitationCodeHasher(key);
+    }
+}
 
 internal static class AdminSeeder
 {

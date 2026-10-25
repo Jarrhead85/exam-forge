@@ -23,8 +23,8 @@ public sealed class ExamForgeWebFactory : WebApplicationFactory<Program>, IAsync
     private const string ServerConnectionString = "Host=localhost;Port=5432;Username=postgres;Database=postgres";
     public const string TestConnectionString = "Host=localhost;Port=5432;Username=postgres;Database=examforge_test";
 
-    /// <summary>Известный тестам HMAC-ключ кодов приглашений.</summary>
-    public const string TestHmacKey = "00112233445566778899AABBCCDDEEFF";
+    /// <summary>Известный тестам HMAC-ключ кодов приглашений: 64 hex-символа = 32 байта.</summary>
+    public const string TestHmacKey = "00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF";
 
     /// <summary>
     /// Стартует от реального UtcNow (не фиксированной даты): auth-cookie выдаётся на «fake now + 8 ч»,
