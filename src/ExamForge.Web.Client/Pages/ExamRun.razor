@@ -1,0 +1,325 @@
+﻿@page "/exam/run/{attemptId:guid}"
+@layout StudentLayout
+@rendermode InteractiveWebAssembly
+@inject ExamApiClient Api
+@inject NavigationManager Navigation
+@implements IDisposable
+
+<PageTitle>Работа — Exam Forge</PageTitle>
+
+@if (_loading)
+{
+    <p class="ef-card__meta" aria-live="polite">Загрузка…</p>
+}
+else if (_result is not null)
+{
+    <section class="ef-card" aria-labelledby="result-title">
+        <p class="ef-card__eyebrow">Результат</p>
+        <h1 id="result-title" class="ef-card__title">Работа сдана</h1>
+        @if (_result.Provisional)
+        {
+            <div class="ef-callout ef-callout--warning">
+                <p>Часть ответов проверяет преподаватель. Итог появится после проверки.</p>
+            </div>
+        }
+        @if (_result.RoundedPercent is { } percent)
+        {
+            <p class="ef-serif ef-exam-score">
+                Баллы: @($"{_result.EarnedPoints:0.##}") из @($"{_result.MaxPoints:0.##}") · @percent%
+            </p>
+        }
+        else
+        {
+            <p class="ef-card__meta">Попытка №@_result.AttemptNumber находится на проверке.</p>
+        }
+        <a class="ef-button ef-button--secondary" href="exam">К списку работ</a>
+    </section>
+}
+else if (_state is not null)
+{
+    <div class="ef-exam-statusbar">
+        <span class="ef-badge">Вопрос @(_current is null ? 0 : _current.OrderIndex + 1) из @_state.TotalQuestions</span>
+        @if (_remaining is { } remaining && !_expired)
+        {
+            <span class="ef-badge @(remaining.TotalSeconds <= 10 ? "ef-badge--warning" : "")">@($"{(int)remaining.TotalMinutes:00}:{remaining.Seconds:00}")</span>
+        }
+        <span class="ef-exam-save-state" aria-live="polite">@SaveStateLabel</span>
+    </div>
+
+    @if (_current is null)
+    {
+        <section class="ef-card">
+            <h1 class="ef-card__title">Следующий вопрос</h1>
+            <p class="ef-card__meta">Вопрос открывается по нажатию — время начнётся с этого момента.</p>
+            @if (_flowError is not null)
+            {
+                <p class="ef-form-error" role="alert">@_flowError</p>
+            }
+            <button class="ef-button ef-button--primary" @onclick="OpenNextAsync" disabled="@_busy">Открыть вопрос</button>
+        </section>
+    }
+    else
+    {
+        <section class="ef-exam-question ef-card" aria-labelledby="q-@_current.QuestionSessionId">
+            <p class="ef-card__eyebrow">Задание @(_current.OrderIndex + 1)</p>
+            <h1 id="q-@_current.QuestionSessionId" class="ef-card__title">@_current.Prompt</h1>
+            @if (_current.Instruction is { } instruction)
+            {
+                <p class="ef-card__meta">@instruction</p>
+            }
+            <div class="ef-exam-editor @(InputDisabled ? "is-disabled" : "")" aria-disabled="@InputDisabled">
+                <QuestionEditor @ref="_editor" Question="_current" OnChanged="AnswerChangedAsync" />
+            </div>
+        </section>
+
+        @if (_expired)
+        {
+            <div class="ef-callout ef-callout--warning" role="alert">
+                <p>Время истекло. Ответ больше не принимается — нажмите «Далее».</p>
+            </div>
+        }
+
+        <div class="ef-exam-actions">
+            <button class="ef-button ef-button--secondary" @onclick="NextAsync" disabled="@_busy">Далее</button>
+            <button class="ef-button ef-button--quiet" @onclick="AskFinishAsync" disabled="@_busy">Завершить работу</button>
+        </div>
+
+        @if (_confirmFinish)
+        {
+            <div class="ef-dialog-backdrop" role="presentation" @onclick="() => ConfirmFinishAsync(false)">
+                <div class="ef-dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+                    <h2 id="confirm-title" class="ef-card__title">Завершить работу?</h2>
+                    <p class="ef-card__meta">Незакрытые вопросы будут оценены по сохранённым ответам. Действие необратимо.</p>
+                    <div class="ef-exam-actions">
+                        <button class="ef-button ef-button--secondary" @onclick="() => ConfirmFinishAsync(false)">Продолжить работу</button>
+                        <button class="ef-button ef-button--primary" @onclick="() => ConfirmFinishAsync(true)" disabled="@_busy">Завершить</button>
+                    </div>
+                </div>
+            </div>
+        }
+    }
+}
+
+@code {
+    [Parameter] public Guid AttemptId { get; set; }
+
+    private QuestionEditor? _editor;
+    private bool _loading = true;
+    private bool _busy;
+    private bool _expired;
+    private AttemptStateDto? _state;
+    private StudentQuestionDto? _current;
+    private StudentResultDto? _result;
+    private TimeSpan? _remaining;
+    private string? _flowError;
+    private DateTimeOffset _receivedAtUtc;
+    private System.Timers.Timer? _uiTimer;
+    private int _saveGeneration;
+    private SaveState _saveState = SaveState.Idle;
+    private int _acceptedRevision;
+    private bool _confirmFinish;
+
+    private bool InputDisabled => _expired;
+
+    private string SaveStateLabel => _saveState switch
+    {
+        SaveState.Saving => "Сохранение…",
+        SaveState.Saved => $"Сохранено (ревизия {_acceptedRevision})",
+        SaveState.Offline => "Нет связи — ответ не подтверждён сервером. Проверьте соединение.",
+        SaveState.RejectedLate => "Время истекло — последняя правка не принята сервером.",
+        _ => "",
+    };
+
+    private enum SaveState { Idle, Saving, Saved, Offline, RejectedLate }
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (!RendererInfo.IsInteractive)
+            return; // статический пререндер: состояние загрузит интерактивный режим
+        try
+        {
+            _state = await Api.GetStateAsync(AttemptId);
+            if (_state.Status is not ("InProgress"))
+            {
+                _result = await Api.GetResultAsync(AttemptId);
+            }
+            else
+            {
+                AdoptState();
+            }
+        }
+        catch (ExamSessionExpiredException)
+        {
+            Navigation.NavigateTo("exam");
+            return;
+        }
+        catch (ExamApiException)
+        {
+            _flowError = "Не удалось загрузить работу. Обновите страницу.";
+        }
+        _loading = false;
+    }
+
+    private void AdoptState()
+    {
+        _current = _state!.CurrentQuestion;
+        var active = _state.Sessions.FirstOrDefault(s => s.State == "Active");
+        if (active is not null)
+        {
+            _acceptedRevision = active.Revision;
+            _expired = false;
+            _saveState = active.Revision > 0 ? SaveState.Saved : SaveState.Idle;
+            // Клиентский счётчик — только визуализация (ТЗ §10.1); срок владеет сервер.
+            _remaining = active.DeadlineUtc - DateTimeOffset.UtcNow;
+        }
+        else
+        {
+            _remaining = null;
+        }
+        _receivedAtUtc = DateTimeOffset.UtcNow;
+        StartTimer();
+    }
+
+    private void StartTimer()
+    {
+        _uiTimer?.Dispose();
+        _uiTimer = new System.Timers.Timer(1000);
+        _uiTimer.Elapsed += (_, _) => InvokeAsync(Tick);
+        _uiTimer.Start();
+    }
+
+    private void Tick()
+    {
+        if (_remaining is { } remaining)
+        {
+            var adjusted = remaining - (DateTimeOffset.UtcNow - _receivedAtUtc);
+            if (adjusted <= TimeSpan.Zero && !_expired)
+            {
+                _expired = true;
+                _remaining = TimeSpan.Zero;
+            }
+            else if (adjusted > TimeSpan.Zero)
+            {
+                _remaining = adjusted;
+            }
+        }
+        StateHasChanged();
+    }
+
+    private async Task OpenNextAsync()
+    {
+        _busy = true;
+        _flowError = null;
+        try
+        {
+            _state = await Api.OpenNextAsync(AttemptId);
+            _expired = false;
+            AdoptState();
+        }
+        catch (ExamApiException ex)
+        {
+            _flowError = ex.Message;
+        }
+        finally { _busy = false; }
+    }
+
+    private async Task NextAsync()
+    {
+        _busy = true;
+        _flowError = null;
+        try
+        {
+            if (!_expired)
+                await SaveNowAsync();
+            await Api.LockCurrentAsync(AttemptId);
+            _state = await Api.OpenNextAsync(AttemptId);
+            _expired = false;
+            if (_state.CurrentQuestion is null && _state.Sessions.All(s => s.State != "NotOpened"))
+            {
+                await FinishAsync();
+                return;
+            }
+            AdoptState();
+        }
+        catch (ExamApiException ex)
+        {
+            _flowError = ex.Message;
+        }
+        finally { _busy = false; }
+    }
+
+    private async Task AskFinishAsync()
+    {
+        // Явное подтверждение завершения — встроенный диалог в стиле UI Kit вместо системного confirm().
+        _confirmFinish = true;
+        StateHasChanged();
+    }
+
+    private async Task ConfirmFinishAsync(bool confirmed)
+    {
+        _confirmFinish = false;
+        if (confirmed)
+            await FinishAsync();
+        StateHasChanged();
+    }
+
+    private async Task FinishAsync()
+    {
+        _busy = true;
+        try
+        {
+            await Api.FinishAsync(AttemptId);
+            _result = await Api.GetResultAsync(AttemptId);
+            _state = null;
+            _current = null;
+            StopTimer();
+        }
+        catch (ExamApiException ex)
+        {
+            _flowError = ex.Message;
+        }
+        finally { _busy = false; }
+    }
+
+    // ---------- autosave (debounce 500 мс; Saved = подтверждение сервером, ТЗ §10.3) ----------
+
+    private async Task AnswerChangedAsync()
+    {
+        if (_current is null || _expired)
+            return;
+        var generation = ++_saveGeneration;
+        _saveState = SaveState.Saving;
+        await Task.Delay(500);
+        if (generation != _saveGeneration)
+            return;
+        await SaveNowAsync(generation);
+    }
+
+    private async Task SaveNowAsync(int? generation = null)
+    {
+        if (_current is null || _editor is null)
+            return;
+        try
+        {
+            var result = await Api.SaveAnswerAsync(AttemptId, _current.QuestionSessionId, _editor.BuildAnswer());
+            if (generation is null || generation == _saveGeneration)
+            {
+                _acceptedRevision = result.AcceptedRevision ?? _acceptedRevision;
+                _saveState = SaveState.Saved;
+            }
+        }
+        catch (ExamApiException ex) when (ex.IsRejectedLate)
+        {
+            _saveState = SaveState.RejectedLate;
+            _expired = true;
+        }
+        catch (Exception)
+        {
+            _saveState = SaveState.Offline; // локальная запись ≠ принятая сервером (ТЗ §10.3)
+        }
+    }
+
+    private void StopTimer() { _uiTimer?.Dispose(); _uiTimer = null; }
+
+    public void Dispose() => StopTimer();
+}

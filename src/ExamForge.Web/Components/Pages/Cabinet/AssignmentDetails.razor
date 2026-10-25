@@ -1,0 +1,614 @@
+﻿@page "/cabinet/assignments/{assignmentId:guid}"
+@layout Layout.TeacherLayout
+@attribute [Authorize]
+@* prerender: содержимое видно мгновенно; формы защищены submit-блокировщиком в App.razor *@
+@rendermode InteractiveServer
+@using ExamForge.Application.TeacherFlow
+@using ExamForge.Infrastructure.Identity
+@using ExamForge.Infrastructure.Services
+@using Microsoft.AspNetCore.Identity
+@inject TeacherAssignmentsService AssignmentsService
+@inject PaperWorkService PaperWorks
+@inject GroupService GroupService
+@inject UserManager<TeacherUser> UserManager
+@inject AuthenticationStateProvider AuthState
+@inject NavigationManager Navigation
+
+<PageTitle>Назначение — Exam Forge</PageTitle>
+
+@if (_details is null)
+{
+    <p class="ef-card__meta" aria-live="polite">@(_error ?? "Загрузка…")</p>
+}
+else
+{
+    var a = _details.Assignment;
+    <h1>@a.TestTitle</h1>
+    <p class="ef-card__meta">
+        @(a.Mode == "Assessment" ? "Контрольная" : "Тренировка") · попыток: @a.MaxAttempts ·
+        @(a.IsOpen ? "открыто" : "закрыто")
+        @(a.ClosesAtUtc is { } closes ? $"до {closes.LocalDateTime:dd.MM.yyyy HH:mm}" : "")
+    </p>
+
+    <div class="ef-callout ef-callout--info">
+        <p>
+            <strong>Как выдать работу:</strong> 1) добавьте студента ниже — получите одноразовый код;
+            2) передайте код лично (повторно он не показывается); 3) студент открывает страницу
+            «Студентам» (<span class="ef-mono">/exam</span>), вводит код и проходит работу.
+            Уже добавленному студенту код перевыпускается кнопкой «Перевыпустить».
+        </p>
+    </div>
+
+    @if (_error is not null)
+    {
+        <p class="ef-form-error" role="alert">@_error</p>
+    }
+
+    <section class="ef-card" aria-labelledby="students-title">
+        <h2 id="students-title" class="ef-card__title">Студенты и коды</h2>
+
+        @if (_oneTimeCode is not null)
+        {
+            <div class="ef-callout ef-callout--warning" role="alert">
+                <p>
+                    Код для выдачи студенту: <strong class="ef-code-once">@_oneTimeCode</strong><br />
+                    Скопируйте сейчас — повторно код не показывается и не хранится.
+                </p>
+            </div>
+        }
+
+        <EditForm Model="AddForm" OnValidSubmit="AddStudentAsync" class="ef-form">
+            <DataAnnotationsValidator />
+            <div class="ef-field">
+                <label for="s-last">Фамилия</label>
+                <InputText id="s-last" @bind-Value="AddForm.LastName" autocomplete="off" />
+            </div>
+            <div class="ef-field">
+                <label for="s-first">Имя</label>
+                <InputText id="s-first" @bind-Value="AddForm.FirstName" autocomplete="off" />
+            </div>
+            <div class="ef-field">
+                <label for="s-middle">Отчество (если есть)</label>
+                <InputText id="s-middle" @bind-Value="AddForm.MiddleName" autocomplete="off" />
+            </div>
+            <button class="ef-button ef-button--primary" type="submit" disabled="@_busy">Добавить и выдать код</button>
+        </EditForm>
+
+        @if (_groupStudents.Count > 0)
+        {
+            <div class="ef-form ef-form--inline">
+                <div class="ef-field">
+                    <label for="s-existing">Выдать код существующему студенту</label>
+                    <select id="s-existing" @bind="_existingStudentId">
+                        @foreach (var s in _groupStudents)
+                        {
+                            <option value="@s.Id">@s.Name</option>
+                        }
+                    </select>
+                </div>
+                <button class="ef-button ef-button--secondary" @onclick="InviteExistingAsync" disabled="@_busy">
+                    Выдать код
+                </button>
+            </div>
+        }
+
+        @if (_details.Invitations.Count > 0)
+        {
+            <table class="ef-table">
+                <caption>Приглашения</caption>
+                <thead>
+                    <tr>
+                        <th scope="col">Студент</th>
+                        <th scope="col">Код выдан</th>
+                        <th scope="col">Статус кода</th>
+                        <th scope="col"></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var invitation in _details.Invitations)
+                    {
+                        <tr>
+                            <td>@invitation.StudentName</td>
+                            <td>@invitation.CreatedAtUtc.LocalDateTime.ToString("dd.MM HH:mm")</td>
+                            <td>@(invitation.Status == "Active" ? "действует" : "отозван")</td>
+                            <td>
+                                @if (invitation.Status == "Active")
+                                {
+                                    <div class="ef-actions">
+                                        <button class="ef-button ef-button--sm ef-button--quiet"
+                                                @onclick="() => RevokeAsync(invitation.InvitationId)">Отозвать</button>
+                                        <button class="ef-button ef-button--sm ef-button--quiet"
+                                                @onclick="() => ReissueAsync(invitation.InvitationId)">Перевыпустить</button>
+                                    </div>
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+        else
+        {
+            <div class="ef-callout ef-callout--info"><p>Студенты не добавлены.</p></div>
+        }
+    </section>
+
+    <section class="ef-card" aria-labelledby="common-link-title">
+        <h2 id="common-link-title" class="ef-card__title">Общая ссылка</h2>
+        <p class="ef-card__meta">
+            Выключена по умолчанию: ФИО+группа не подтверждают личность, строгой защиты повторного входа нет.
+        </p>
+        @if (_commonLinkCode is not null)
+        {
+            <div class="ef-callout ef-callout--warning">
+                <p>Ссылка для студентов: <strong class="ef-mono">/exam?link=@_commonLinkCode</strong></p>
+            </div>
+            <button class="ef-button ef-button--quiet" @onclick="DisableCommonLinkAsync" disabled="@_busy">Отключить ссылку</button>
+        }
+        else
+        {
+            <button class="ef-button ef-button--secondary" @onclick="EnableCommonLinkAsync" disabled="@_busy">
+                Включить общую ссылку
+            </button>
+        }
+    </section>
+
+    <section class="ef-card" aria-labelledby="accounts-title">
+        <h2 id="accounts-title" class="ef-card__title">Постоянные аккаунты</h2>
+        <p class="ef-card__meta">Логин выдаётся системой; пароль показывается один раз при создании.</p>
+        @if (_oneTimePassword is not null)
+        {
+            <div class="ef-callout ef-callout--warning" role="alert">
+                <p>
+                    Логин: <strong class="ef-mono">@_oneTimeLogin</strong><br />
+                    Одноразовый пароль: <strong class="ef-mono">@_oneTimePassword</strong><br />
+                    Передайте студенту сейчас — повторно пароль не показывается.
+                </p>
+            </div>
+        }
+        <div class="ef-form">
+            <div class="ef-field">
+                <label for="acc-student">Студент</label>
+                <select id="acc-student" @bind="_accountStudentId">
+                    @foreach (var invitation in _details.Invitations.Where(i => i.Status == "Active"))
+                    {
+                        <option value="@invitation.StudentProfileId">@invitation.StudentName</option>
+                    }
+                </select>
+            </div>
+            <button class="ef-button ef-button--secondary" @onclick="CreateAccountAsync" disabled="@_busy">
+                Создать аккаунт
+            </button>
+        </div>
+    </section>
+
+    <section class="ef-card" aria-labelledby="grant-title">
+        <h2 id="grant-title" class="ef-card__title">Дополнительная попытка</h2>
+        <EditForm Model="GrantForm" OnValidSubmit="GrantAsync" class="ef-form">
+            <DataAnnotationsValidator />
+            <div class="ef-field">
+                <label for="g-student">Студент</label>
+                <select id="g-student" @bind="GrantForm.StudentProfileId">
+                    @foreach (var invitation in _details.Invitations.Where(i => i.Status == "Active"))
+                    {
+                        <option value="@invitation.StudentProfileId">@invitation.StudentName</option>
+                    }
+                </select>
+            </div>
+            <div class="ef-field">
+                <label for="g-reason">Причина (обязательна)</label>
+                <InputText id="g-reason" @bind-Value="GrantForm.Reason" autocomplete="off" />
+            </div>
+            <button class="ef-button ef-button--secondary" type="submit" disabled="@_busy">Выдать</button>
+        </EditForm>
+    </section>
+
+    <section class="ef-card" aria-labelledby="paper-title">
+        <h2 id="paper-title" class="ef-card__title">Бумажные работы</h2>
+        <p class="ef-card__meta">
+            Ввод баллов с печатных листов: Origin=Paper, отдельная строка в ведомости.
+            Сканы приватны; лимит пакета — 50 МиБ.
+        </p>
+
+        <EditForm Model="PaperForm" OnValidSubmit="SavePaperWorkAsync" class="ef-form">
+            <DataAnnotationsValidator />
+            <div class="ef-field">
+                <label for="pw-name">ФИО студента</label>
+                <InputText id="pw-name" @bind-Value="PaperForm.StudentName" autocomplete="off" />
+            </div>
+            <div class="ef-field">
+                <label for="pw-group">Группа</label>
+                <InputText id="pw-group" @bind-Value="PaperForm.StudentGroup" autocomplete="off" />
+            </div>
+            <div class="ef-field">
+                <label for="pw-scores">Баллы по заданиям (формат: «1: 4/5; 2: 3/3»)</label>
+                <InputText id="pw-scores" @bind-Value="PaperForm.ScoresText" autocomplete="off" placeholder="1: 4/5; 2: 3/3" />
+            </div>
+            <div class="ef-field">
+                <label for="pw-comment">Комментарий</label>
+                <InputText id="pw-comment" @bind-Value="PaperForm.Comment" autocomplete="off" />
+            </div>
+            <div class="ef-field">
+                <label for="pw-scans">Сканы/фото (JPEG, PNG, PDF)</label>
+                <InputFile id="pw-scans" OnChange="PaperScansSelectedAsync" multiple accept=".jpg,.jpeg,.png,.pdf" />
+            </div>
+            @if (_paperError is not null)
+            {
+                <p class="ef-form-error" role="alert">@_paperError</p>
+            }
+            @if (_paperSaved)
+            {
+                <div class="ef-callout ef-callout--info"><p>Бумажная работа сохранена со сканами.</p></div>
+            }
+            <button class="ef-button ef-button--secondary" type="submit" disabled="@_busy">Сохранить работу</button>
+        </EditForm>
+
+        @if (_paperWorks.Count > 0)
+        {
+            <table class="ef-table">
+                <caption>Введённые бумажные работы (Origin=Paper)</caption>
+                <thead>
+                    <tr>
+                        <th scope="col">Студент</th>
+                        <th scope="col">Баллы</th>
+                        <th scope="col">Сканов</th>
+                        <th scope="col">Введена</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var work in _paperWorks)
+                    {
+                        <tr>
+                            <td>@work.StudentName @(work.StudentGroup is { } g ? $"({g})" : "")</td>
+                            <td>@($"{work.TotalEarned:0.##}") / @($"{work.TotalMax:0.##}")</td>
+                            <td>@work.ScanCount</td>
+                            <td>@work.CreatedAtUtc.LocalDateTime.ToString("dd.MM HH:mm")</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+    </section>
+
+    <section aria-labelledby="attempts-title">
+        <h2 id="attempts-title">Попытки</h2>
+        <p>
+            <a class="ef-button ef-button--sm ef-button--secondary"
+               href="@($"/api/assignments/{AssignmentId}/gradebook.csv")" download>
+                Скачать ведомость (CSV)
+            </a>
+        </p>
+        @if (_details.Attempts.Count == 0)
+        {
+            <div class="ef-callout ef-callout--info"><p>Попыток пока нет.</p></div>
+        }
+        else
+        {
+            <table class="ef-table">
+                <caption>Все попытки; лучшая — только среди завершённых проверенных</caption>
+                <thead>
+                    <tr>
+                        <th scope="col">Студент</th>
+                        <th scope="col">№</th>
+                        <th scope="col">Статус</th>
+                        <th scope="col">Баллы</th>
+                        <th scope="col">%</th>
+                        <th scope="col">Завершена</th>
+                        <th scope="col">Лучшая</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var attempt in _details.Attempts)
+                    {
+                        <tr>
+                            <td>@attempt.StudentName</td>
+                            <td>@attempt.AttemptNumber</td>
+                            <td>@StatusText(attempt.Status)</td>
+                            <td>@(attempt.EarnedPoints is { } e ? $"{e:0.##} / {attempt.MaxPoints:0.##}" : "—")</td>
+                            <td>@(attempt.RoundedPercent?.ToString() ?? "—")</td>
+                            <td>@(attempt.CompletedAtUtc?.LocalDateTime.ToString("dd.MM HH:mm") ?? "—")</td>
+                            <td>@(attempt.IsBest ? "★" : "")</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+    </section>
+}
+
+@code {
+    [Parameter] public Guid AssignmentId { get; set; }
+
+    private TeacherAssignmentDetailsDto? _details;
+    private string? _error;
+    private string? _oneTimeCode;
+    private string? _commonLinkCode;
+    private string? _oneTimePassword;
+    private string? _oneTimeLogin;
+    private Guid? _accountStudentId;
+    private Guid? _existingStudentId;
+    private readonly List<(Guid Id, string Name)> _groupStudents = [];
+    private bool _busy;
+    private readonly List<Infrastructure.Services.PaperWorkDto> _paperWorks = [];
+    private readonly List<IBrowserFile> _paperScanFiles = [];
+    private PaperFormModel PaperForm { get; set; } = new();
+    private string? _paperError;
+    private bool _paperSaved;
+
+    private sealed class PaperFormModel
+    {
+        [System.ComponentModel.DataAnnotations.Required(ErrorMessage = "Введите ФИО.")]
+        public string StudentName { get; set; } = string.Empty;
+        public string? StudentGroup { get; set; }
+        [System.ComponentModel.DataAnnotations.Required(ErrorMessage = "Введите баллы: «1: 4/5; 2: 3/3».")]
+        public string ScoresText { get; set; } = string.Empty;
+        public string? Comment { get; set; }
+    }
+
+    private AddFormModel AddForm { get; set; } = new();
+    private GrantFormModel GrantForm { get; set; } = new();
+
+    private sealed class AddFormModel
+    {
+        [System.ComponentModel.DataAnnotations.Required(ErrorMessage = "Введите фамилию.")]
+        public string LastName { get; set; } = string.Empty;
+        [System.ComponentModel.DataAnnotations.Required(ErrorMessage = "Введите имя.")]
+        public string FirstName { get; set; } = string.Empty;
+        public string? MiddleName { get; set; }
+    }
+
+    private sealed class GrantFormModel
+    {
+        public Guid? StudentProfileId { get; set; }
+        [System.ComponentModel.DataAnnotations.Required(ErrorMessage = "Укажите причину.")]
+        public string Reason { get; set; } = string.Empty;
+    }
+
+    protected override async Task OnInitializedAsync() => await ReloadAsync();
+
+    private async Task ReloadAsync()
+    {
+        try
+        {
+            var actor = await ActorAsync();
+            _details = await AssignmentsService.GetAssignmentAsync(actor, AssignmentId, CancellationToken.None);
+            GrantForm.StudentProfileId ??= _details.Invitations.FirstOrDefault()?.StudentProfileId;
+            _accountStudentId ??= _details.Invitations.FirstOrDefault()?.StudentProfileId;
+            _commonLinkCode = await AssignmentsService.GetCommonLinkCodeAsync(actor, AssignmentId, CancellationToken.None);
+            _paperWorks.Clear();
+            _paperWorks.AddRange(await PaperWorks.ListAsync(actor, AssignmentId, CancellationToken.None));
+            // Студенты своих групп — для выдачи кода существующему профилю (ТЗ §4).
+            _groupStudents.Clear();
+            _groupStudents.AddRange(await GroupService.StudentsForTeacherAsync(actor, CancellationToken.None));
+            _existingStudentId ??= _groupStudents.FirstOrDefault().Id;
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+    }
+
+    private async Task InviteExistingAsync()
+    {
+        _busy = true;
+        _error = null;
+        try
+        {
+            if (_existingStudentId is { } studentId)
+            {
+                var dto = await AssignmentsService.CreateInvitationForStudentAsync(
+                    await ActorAsync(), AssignmentId, studentId, CancellationToken.None);
+                _oneTimeCode = dto.OneTimeCode; // показывается ровно один раз (ADR-002)
+                await ReloadAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally { _busy = false; }
+    }
+
+    private void PaperScansSelectedAsync(InputFileChangeEventArgs e)
+    {
+        _paperScanFiles.Clear();
+        _paperScanFiles.AddRange(e.GetMultipleFiles(10));
+    }
+
+    /// <summary>«1: 4/5; 2: 3/3» → баллы по заданиям; ввод подтверждается преподавателем явно.</summary>
+    private async Task SavePaperWorkAsync()
+    {
+        _busy = true;
+        _paperError = null;
+        _paperSaved = false;
+        try
+        {
+            var actor = await ActorAsync();
+            var scores = new List<Infrastructure.Services.PaperScoreInput>();
+            foreach (var part in PaperForm.ScoresText.Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+            {
+                var bits = part.Split(':', StringSplitOptions.TrimEntries);
+                if (bits.Length != 2 || !int.TryParse(bits[0], out var order))
+                    throw new FormatException($"Непонятная запись: «{part}»");
+                var points = bits[1].Split('/', StringSplitOptions.TrimEntries);
+                if (points.Length != 2
+                    || !decimal.TryParse(points[0], System.Globalization.CultureInfo.InvariantCulture, out var earned)
+                    || !decimal.TryParse(points[1], System.Globalization.CultureInfo.InvariantCulture, out var max))
+                    throw new FormatException($"Непонятные баллы: «{bits[1]}»");
+                scores.Add(new Infrastructure.Services.PaperScoreInput(order - 1, $"Задание {order}", earned, max, null));
+            }
+
+            var work = await PaperWorks.CreateAsync(actor, AssignmentId,
+                new Infrastructure.Services.CreatePaperWorkRequest(
+                    PaperForm.StudentName, PaperForm.StudentGroup, PaperForm.Comment, scores, null),
+                CancellationToken.None);
+
+            if (_paperScanFiles.Count > 0)
+            {
+                var opened = new List<(Stream, string, string?)>();
+                try
+                {
+                    foreach (var file in _paperScanFiles)
+                        opened.Add((file.OpenReadStream(50 * 1024 * 1024), file.Name, file.ContentType));
+                    await PaperWorks.AttachScansAsync(actor, work.Id, opened, CancellationToken.None);
+                }
+                finally
+                {
+                    foreach (var (stream, _, _) in opened)
+                        stream.Dispose();
+                }
+            }
+
+            _paperSaved = true;
+            PaperForm = new PaperFormModel();
+            _paperScanFiles.Clear();
+            await ReloadAsync();
+        }
+        catch (Exception ex)
+        {
+            _paperError = ex.Message;
+        }
+        finally { _busy = false; }
+    }
+
+    private async Task EnableCommonLinkAsync()
+    {
+        _busy = true;
+        _error = null;
+        try
+        {
+            _commonLinkCode = await AssignmentsService.EnableCommonLinkAsync(await ActorAsync(), AssignmentId, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally { _busy = false; }
+    }
+
+    private async Task DisableCommonLinkAsync()
+    {
+        _busy = true;
+        _error = null;
+        try
+        {
+            await AssignmentsService.DisableCommonLinkAsync(await ActorAsync(), AssignmentId, CancellationToken.None);
+            _commonLinkCode = null;
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally { _busy = false; }
+    }
+
+    private async Task CreateAccountAsync()
+    {
+        _busy = true;
+        _error = null;
+        try
+        {
+            if (_accountStudentId is { } studentId)
+            {
+                var (account, password) = await AssignmentsService.CreateStudentAccountAsync(
+                    await ActorAsync(), AssignmentId, studentId, CancellationToken.None);
+                _oneTimeLogin = account.Login;
+                _oneTimePassword = password; // показывается ровно один раз
+            }
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally { _busy = false; }
+    }
+
+    private async Task AddStudentAsync()
+    {
+        _busy = true;
+        _error = null;
+        try
+        {
+            var dto = await AssignmentsService.AddStudentWithInvitationAsync(await ActorAsync(), AssignmentId,
+                new AddStudentRequest(AddForm.LastName, AddForm.FirstName, AddForm.MiddleName, null),
+                CancellationToken.None);
+            _oneTimeCode = dto.OneTimeCode; // показывается ровно один раз (ADR-002)
+            AddForm = new AddFormModel();
+            await ReloadAsync();
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally { _busy = false; }
+    }
+
+    private async Task RevokeAsync(Guid invitationId)
+    {
+        _error = null;
+        try
+        {
+            await AssignmentsService.RevokeInvitationAsync(await ActorAsync(), invitationId, CancellationToken.None);
+            await ReloadAsync();
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+    }
+
+    private async Task ReissueAsync(Guid invitationId)
+    {
+        _error = null;
+        try
+        {
+            var (_, _, code) = await AssignmentsService.ReissueInvitationAsync(
+                await ActorAsync(), invitationId, CancellationToken.None);
+            _oneTimeCode = code; // показываем новый код один раз
+            await ReloadAsync();
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+    }
+
+    private async Task GrantAsync()
+    {
+        _busy = true;
+        _error = null;
+        try
+        {
+            if (GrantForm.StudentProfileId is { } studentId)
+            {
+                await AssignmentsService.CreateExtraGrantAsync(await ActorAsync(), AssignmentId,
+                    new ExtraGrantRequest(GrantForm.Reason, studentId), CancellationToken.None);
+                GrantForm = new GrantFormModel();
+                await ReloadAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally { _busy = false; }
+    }
+
+    private async Task<TeacherActor> ActorAsync()
+    {
+        var state = await AuthState.GetAuthenticationStateAsync();
+        var user = await UserManager.GetUserAsync(state.User)
+            ?? throw new InvalidOperationException("Нет пользователя.");
+        return new TeacherActor(user.Id, await UserManager.IsInRoleAsync(user, AppRoles.Administrator));
+    }
+
+    private static string StatusText(string status) => status switch
+    {
+        "InProgress" => "проходит",
+        "Submitted" => "сдана",
+        "PendingReview" => "на проверке",
+        "Finalized" => "итог подведён",
+        "Cancelled" => "отменена",
+        _ => status,
+    };
+}

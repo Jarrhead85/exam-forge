@@ -1,0 +1,21 @@
+@page "/account/logout"
+@layout Layout.MainLayout
+@using ExamForge.Infrastructure.Identity
+@inject SignInManager<TeacherUser> SignInManager
+@inject NavigationManager Navigation
+
+<PageTitle>Выход — Exam Forge</PageTitle>
+
+@code {
+    [CascadingParameter]
+    private HttpContext? HttpContext { get; set; }
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (HttpContext is not null)
+        {
+            await SignInManager.SignOutAsync();
+        }
+        Navigation.NavigateTo("/", forceLoad: true);
+    }
+}

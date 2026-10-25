@@ -1,0 +1,111 @@
+﻿@page "/cabinet"
+@layout Layout.TeacherLayout
+@attribute [Authorize]
+@* prerender: контент обзора виден мгновенно из SSR-ответа, ещё до подключения circuit
+   (страница без форм — статической отправки быть не может). *@
+@rendermode InteractiveServer
+@using ExamForge.Application.TeacherFlow
+@using ExamForge.Infrastructure.Identity
+@using ExamForge.Infrastructure.Services
+@using Microsoft.AspNetCore.Identity
+@inject TeacherAssignmentsService AssignmentsService
+@inject ManualReviewService Reviews
+@inject UserManager<TeacherUser> UserManager
+@inject AuthenticationStateProvider AuthState
+
+<PageTitle>Обзор — Exam Forge</PageTitle>
+
+<h1>Обзор</h1>
+<p class="ef-card__meta">Актуальные действия, без декоративных KPI.</p>
+
+<section class="ef-card" aria-labelledby="howto-title">
+    <h2 id="howto-title" class="ef-card__title">Как провести работу: три шага</h2>
+    <ol class="ef-howto">
+        <li>
+            <strong>Тесты</strong> — создайте тест, соберите версию из опубликованных заданий банка,
+            опубликуйте её и сгенерируйте варианты.
+        </li>
+        <li>
+            <strong>Назначения</strong> — создайте назначение на опубликованную версию: режим
+            (контрольная/тренировка), сроки, число попыток.
+        </li>
+        <li>
+            <strong>Выдайте коды</strong> — в карточке назначения добавьте студентов и передайте каждому
+            одноразовый код лично. Студент открывает страницу «Студентам» (<span class="ef-mono">/exam</span>),
+            вводит код и проходит работу. Результаты появятся в «Проверке» и «Результатах».
+        </li>
+    </ol>
+    <p class="ef-card__meta">
+        Печать «Лист студента»/«Ключ» — для проведения на бумаге; онлайн-работа идёт по коду без распечаток.
+        Подробнее — <a href="cabinet/help">Справка преподавателя</a>.
+    </p>
+</section>
+
+@if (_assignments.Count == 0)
+{
+    <div class="ef-callout ef-callout--info">
+        <p>Назначений нет. Путь: «Тесты» → версия из банка → варианты → «Назначения» → назначение группы/студентов.</p>
+    </div>
+}
+
+@if (_pendingReview.Count > 0)
+{
+    <section class="ef-card" aria-labelledby="dash-review">
+        <h2 id="dash-review" class="ef-card__title">Ждут проверки</h2>
+        @foreach (var attempt in _pendingReview)
+        {
+            <p>
+                <a href="@($"cabinet/reviews/{attempt.AttemptId}")">@attempt.StudentName — попытка @attempt.AttemptNumber</a>
+                <span class="ef-card__meta">(@attempt.PendingCriteria критериев ожидают)</span>
+            </p>
+        }
+    </section>
+}
+
+<section class="ef-card" aria-labelledby="dash-assignments">
+    <h2 id="dash-assignments" class="ef-card__title">Назначения</h2>
+    @if (_assignments.Count > 0)
+    {
+        <table class="ef-table">
+            <caption>Последние назначения</caption>
+            <thead>
+                <tr><th scope="col">Тест</th><th scope="col">Студентов</th><th scope="col">Попыток</th><th scope="col">Статус</th><th scope="col"></th></tr>
+            </thead>
+            <tbody>
+                @foreach (var a in _assignments.Take(5))
+                {
+                    <tr>
+                        <td>@a.TestTitle</td>
+                        <td>@a.StudentsInvited</td>
+                        <td>@a.AttemptsStarted / @a.MaxAttempts</td>
+                        <td>@(a.IsOpen ? "открыто" : "закрыто")</td>
+                        <td><a class="ef-button ef-button--sm ef-button--secondary" href="@($"cabinet/assignments/{a.AssignmentId}")">Открыть</a></td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+</section>
+
+@code {
+    private List<TeacherAssignmentDto> _assignments = [];
+    private readonly List<ReviewQueueItemDto> _pendingReview = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        var actor = await ActorAsync();
+        _assignments = [.. await AssignmentsService.ListAssignmentsAsync(actor, CancellationToken.None)];
+        // Один батч-запрос по всем открытым назначениям вместо N вызовов очереди.
+        var openIds = _assignments.Where(a => a.IsOpen).Take(10).Select(a => a.AssignmentId).ToList();
+        var pending = await Reviews.GetOpenQueueAsync(actor, openIds, CancellationToken.None);
+        _pendingReview.AddRange(pending.Select(p => p.Item));
+    }
+
+    private async Task<TeacherActor> ActorAsync()
+    {
+        var state = await AuthState.GetAuthenticationStateAsync();
+        var user = await UserManager.GetUserAsync(state.User)
+            ?? throw new InvalidOperationException("Нет пользователя.");
+        return new TeacherActor(user.Id, await UserManager.IsInRoleAsync(user, AppRoles.Administrator));
+    }
+}

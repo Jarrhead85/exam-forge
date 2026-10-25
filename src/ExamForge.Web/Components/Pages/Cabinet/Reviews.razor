@@ -1,0 +1,115 @@
+﻿@page "/cabinet/reviews"
+@layout Layout.TeacherLayout
+@attribute [Authorize]
+@* prerender: очередь видна сразу из SSR; форм нет — статическая отправка невозможна. *@
+@rendermode InteractiveServer
+@using ExamForge.Application.TeacherFlow
+@using ExamForge.Infrastructure.Identity
+@using ExamForge.Infrastructure.Persistence
+@using ExamForge.Infrastructure.Services
+@using Microsoft.AspNetCore.Identity
+@using Microsoft.EntityFrameworkCore
+@inject ManualReviewService ReviewService
+@inject TeacherAssignmentsService AssignmentsService
+@inject ExamForgeDbContext Db
+@inject UserManager<TeacherUser> UserManager
+@inject AuthenticationStateProvider AuthState
+
+<PageTitle>Проверка — Exam Forge</PageTitle>
+
+<h1>Проверка</h1>
+<p class="ef-card__meta">Очередь ручной проверки: ответ студента, ключ, критерии и начисление.</p>
+
+<div class="ef-form">
+    <div class="ef-field">
+        <label for="r-assignment">Назначение</label>
+        <select id="r-assignment" @bind="_selectedAssignmentId" @bind:after="QueueReloadAsync">
+            <option value="">— выберите —</option>
+            @foreach (var a in _assignments)
+            {
+                <option value="@a.AssignmentId">@a.TestTitle</option>
+            }
+        </select>
+    </div>
+</div>
+
+@if (_selectedAssignmentId is { } assignmentId)
+{
+    @if (_queue.Count == 0)
+    {
+        <div class="ef-callout ef-callout--info"><p>Работ на проверку нет.</p></div>
+    }
+    else
+    {
+        <table class="ef-table">
+            <caption>Попытки назначения</caption>
+            <thead>
+                <tr>
+                    <th scope="col">Студент</th>
+                    <th scope="col">Попытка</th>
+                    <th scope="col">Статус</th>
+                    <th scope="col">Ожидают проверки</th>
+                    <th scope="col"></th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var item in _queue)
+                {
+                    <tr>
+                        <td>@item.StudentName @(item.StudentGroup is { } g ? $"({g})" : "")</td>
+                        <td>@item.AttemptNumber</td>
+                        <td>@StatusText(item.Status)</td>
+                        <td>@item.PendingCriteria из @item.TotalCriteria</td>
+                        <td>
+                            <a class="ef-button ef-button--sm ef-button--secondary"
+                               href="@($"cabinet/reviews/{item.AttemptId}")">Открыть</a>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+}
+
+@code {
+    private Guid? _selectedAssignmentId;
+    private readonly List<TeacherAssignmentDto> _assignments = [];
+    private readonly List<ReviewQueueItemDto> _queue = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        var actor = await ActorAsync();
+        _assignments.AddRange(await AssignmentsService.ListAssignmentsAsync(actor, CancellationToken.None));
+        // Автовыбор первого назначения: преподаватель сразу видит очередь без лишнего клика.
+        _selectedAssignmentId = _assignments.FirstOrDefault()?.AssignmentId;
+        if (_selectedAssignmentId is { } id)
+            _queue.AddRange(await ReviewService.GetQueueAsync(actor, id, null, CancellationToken.None));
+    }
+
+    private async Task QueueReloadAsync()
+    {
+        if (_selectedAssignmentId is { } assignmentId)
+        {
+            _queue.Clear();
+            _queue.AddRange(await ReviewService.GetQueueAsync(await ActorAsync(), assignmentId, null, CancellationToken.None));
+        }
+    }
+
+    private async Task<TeacherActor> ActorAsync()
+    {
+        var state = await AuthState.GetAuthenticationStateAsync();
+        var user = await UserManager.GetUserAsync(state.User)
+            ?? throw new InvalidOperationException("Нет пользователя.");
+        return new TeacherActor(user.Id, await UserManager.IsInRoleAsync(user, AppRoles.Administrator));
+    }
+
+    private static string StatusText(string status) => status switch
+    {
+        "InProgress" => "проходит",
+        "Submitted" => "сдана",
+        "PendingReview" => "на проверке",
+        "Finalized" => "итог подведён",
+        "Cancelled" => "отменена",
+        _ => status,
+    };
+}

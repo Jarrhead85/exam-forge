@@ -1,0 +1,665 @@
+﻿@page "/cabinet/questions"
+@layout Layout.TeacherLayout
+@attribute [Authorize]
+@* prerender: содержимое видно мгновенно; формы защищены submit-блокировщиком в App.razor *@
+@rendermode InteractiveServer
+@using ExamForge.Domain.Questions
+@using ExamForge.Application.TeacherFlow
+@using ExamForge.Infrastructure.Identity
+@using ExamForge.Infrastructure.Persistence
+@using ExamForge.Infrastructure.Services
+@using Microsoft.AspNetCore.Identity
+@using Microsoft.EntityFrameworkCore
+@inject TeacherQuestionsService QuestionBank
+@inject ExamForgeDbContext Db
+@inject UserManager<TeacherUser> UserManager
+@inject AuthenticationStateProvider AuthState
+@inject Microsoft.JSInterop.IJSRuntime Js
+
+<PageTitle>Банк заданий — Exam Forge</PageTitle>
+
+<h1>Банк заданий</h1>
+<p class="ef-card__meta">Черновик → публикация. Начните с пустого задания или выберите шаблон структуры; ключи подтверждает преподаватель.</p>
+
+@* Редактор свёрнут, когда банк уже заполнен: список и фильтры видны сразу (частое действие).
+   При правке/пустом банке блок раскрывается автоматически и скроллится. *@
+<details class="ef-card" id="q-editor" open="@(_questions.Count == 0 || _editingQuestionId is not null)">
+    <summary class="ef-card__title ef-summary-toggle">
+        @(_editingQuestionId is null ? "Создать задание" : "Правка задания")
+    </summary>
+    @if (_editingQuestionId is not null)
+    {
+        <p class="ef-card__meta">Правка опубликованного задания создаст новую редакцию; существующие версии тестов не изменятся.</p>
+    }
+    <div class="ef-form ef-form--inline">
+        <div class="ef-field">
+            <label for="q-subject">Предмет</label>
+            <select id="q-subject" @bind="Form.SubjectId">
+                @foreach (var s in _subjects)
+                {
+                    <option value="@s.Id">@s.Name</option>
+                }
+            </select>
+        </div>
+        <div class="ef-field">
+            <label for="tpl">Шаблон структуры</label>
+            <select id="tpl" @bind="_selectedTemplate" @bind:after="ApplyTemplate">
+                <option value="">— без шаблона —</option>
+                @foreach (var preset in MedicalTemplates.All)
+                {
+                    <option value="@preset.Code">@preset.Title (@preset.Type)</option>
+                }
+            </select>
+        </div>
+    </div>
+
+    <EditForm Model="Form" OnValidSubmit="SaveAsync" class="ef-form">
+        <DataAnnotationsValidator />
+        <div class="ef-field">
+            <label for="q-type">Тип</label>
+            <select id="q-type" @bind="Form.Type">
+                @foreach (var type in Enum.GetValues<QuestionType>())
+                {
+                    <option value="@type">@TypeText(type)</option>
+                }
+            </select>
+        </div>
+        <div class="ef-field">
+            <label for="q-prompt">Формулировка</label>
+            <InputText id="q-prompt" @bind-Value="Form.Prompt" autocomplete="off" />
+            <ValidationMessage For="() => Form.Prompt" />
+        </div>
+        <div class="ef-field">
+            <label for="q-instr">Инструкция (необязательно)</label>
+            <InputText id="q-instr" @bind-Value="Form.Instruction" autocomplete="off" />
+        </div>
+        <div class="ef-form ef-form--inline">
+            <div class="ef-field">
+                <label for="q-max">Максимум баллов</label>
+                <InputNumber id="q-max" @bind-Value="Form.MaxPoints" step="0.5" min="0.5" />
+            </div>
+            <div class="ef-field">
+                <label for="q-time">Секунд на вопрос</label>
+                <InputNumber id="q-time" @bind-Value="Form.TimeLimitSeconds" min="5" max="3600" />
+            </div>
+        </div>
+
+        @* ---- редакторы по типу ---- *@
+        @if (Form.Type is QuestionType.SingleChoice or QuestionType.MultipleChoice)
+        {
+            <fieldset>
+                <legend class="ef-card__meta">Варианты ответа @(Form.Type == QuestionType.MultipleChoice ? "(отметьте верные)" : "(отметьте верный)")</legend>
+                @for (var i = 0; i < Form.Options.Count; i++)
+                {
+                    var index = i;
+                    <div class="ef-review-criterion">
+                        <input type="@InputKind()"
+                               name="correct" value="@index"
+                               checked="@IsCorrect(index)"
+                               @onclick="() => ToggleCorrect(index)"
+                               aria-label="Верный вариант @(index + 1)" />
+                        <input class="ef-input" @bind="Form.Options[index].Text" placeholder="Текст варианта" />
+                        <button type="button" class="ef-button ef-button--sm ef-button--quiet" @onclick="() => Form.Options.RemoveAt(index)">Убрать</button>
+                    </div>
+                }
+                <button type="button" class="ef-button ef-button--sm ef-button--secondary" @onclick="AddOption">+ вариант</button>
+                @if (Form.Type == QuestionType.MultipleChoice)
+                {
+                    <div class="ef-field">
+                        <label for="q-scoring">Начисление</label>
+                        <select id="q-scoring" @bind="Form.Scoring">
+                            <option value="AllOrNothing">Все или ничего</option>
+                            <option value="PartialPerCorrect">За каждый верный вариант</option>
+                        </select>
+                    </div>
+                }
+            </fieldset>
+        }
+        else if (Form.Type is QuestionType.ShortText)
+        {
+            <div class="ef-field">
+                <label for="q-accepted">Допустимые ответы (через ;)</label>
+                <InputText id="q-accepted" @bind-Value="Form.AcceptedText" autocomplete="off" />
+            </div>
+            <div class="ef-field ef-field--check">
+                <label><input type="checkbox" @bind="Form.IgnoreCase" /> Игнорировать регистр</label>
+            </div>
+            <div class="ef-field ef-field--check">
+                <label><input type="checkbox" @bind="Form.IgnoreDiacritics" /> Игнорировать диакритику</label>
+            </div>
+            <div class="ef-field ef-field--check">
+                <label><input type="checkbox" @bind="Form.SendToReview" /> Незнакомые ответы — на ручную проверку</label>
+            </div>
+        }
+        else if (Form.Type is QuestionType.LongText)
+        {
+            <div class="ef-callout ef-callout--info"><p>Развёрнутый ответ: проверка вручную по рубрике.</p></div>
+        }
+        else if (Form.Type is QuestionType.Structured)
+        {
+            <fieldset>
+                <legend class="ef-card__meta">Поля (id, название, верный ответ, баллы)</legend>
+                @for (var i = 0; i < Form.Fields.Count; i++)
+                {
+                    var index = i;
+                    <div class="ef-review-criterion">
+                        <input class="ef-input ef-input--short" @bind="Form.Fields[index].Label" placeholder="Название" />
+                        <input class="ef-input" @bind="Form.Fields[index].Correct" placeholder="Верный ответ" />
+                        <input type="number" class="ef-input ef-input--score" step="0.5" @bind="Form.Fields[index].Points" />
+                        <button type="button" class="ef-button ef-button--sm ef-button--quiet" @onclick="() => Form.Fields.RemoveAt(index)">Убрать</button>
+                    </div>
+                }
+                <button type="button" class="ef-button ef-button--sm ef-button--secondary" @onclick="() => Form.Fields.Add(new())">+ поле</button>
+            </fieldset>
+        }
+        else if (Form.Type is QuestionType.Matching)
+        {
+            <fieldset>
+                <legend class="ef-card__meta">Пары (термин ↔ перевод)</legend>
+                @for (var i = 0; i < Form.Pairs.Count; i++)
+                {
+                    var index = i;
+                    <div class="ef-review-criterion">
+                        <input class="ef-input" @bind="Form.Pairs[index].Left" placeholder="Термин" />
+                        <span>↔</span>
+                        <input class="ef-input" @bind="Form.Pairs[index].Right" placeholder="Перевод" />
+                        <button type="button" class="ef-button ef-button--sm ef-button--quiet" @onclick="() => Form.Pairs.RemoveAt(index)">Убрать</button>
+                    </div>
+                }
+                <button type="button" class="ef-button ef-button--sm ef-button--secondary" @onclick="() => Form.Pairs.Add(new())">+ пара</button>
+            </fieldset>
+        }
+        else if (Form.Type is QuestionType.LetterAssembly)
+        {
+            <div class="ef-field">
+                <label for="q-word">Термин для сборки</label>
+                <InputText id="q-word" @bind-Value="Form.TargetWord" autocomplete="off" placeholder="oculus" />
+            </div>
+            <p class="ef-card__meta">Плитки создаются автоматически; повторяющиеся буквы получают уникальные id (AC-12).</p>
+        }
+        else if (Form.Type is QuestionType.Ordering)
+        {
+            <fieldset>
+                <legend class="ef-card__meta">Слова в правильном порядке</legend>
+                @for (var i = 0; i < Form.OrderItems.Count; i++)
+                {
+                    var index = i;
+                    <div class="ef-review-criterion">
+                        <span class="ef-badge">@(index + 1)</span>
+                        <input class="ef-input" @bind="Form.OrderItems[index]" />
+                        <button type="button" class="ef-button ef-button--sm" disabled="@(index == 0)" @onclick="() => Move(Form.OrderItems, index, -1)">↑</button>
+                        <button type="button" class="ef-button ef-button--sm" disabled="@(index == Form.OrderItems.Count - 1)" @onclick="() => Move(Form.OrderItems, index, 1)">↓</button>
+                        <button type="button" class="ef-button ef-button--sm ef-button--quiet" @onclick="() => Form.OrderItems.RemoveAt(index)">Убрать</button>
+                    </div>
+                }
+                <button type="button" class="ef-button ef-button--sm ef-button--secondary" @onclick="AddOrderItem">+ слово</button>
+            </fieldset>
+        }
+        else if (Form.Type is QuestionType.GapFill)
+        {
+            <div class="ef-field">
+                <label for="q-gap">Текст с пропусками</label>
+                <InputText id="q-gap" @bind-Value="Form.GapText" autocomplete="off" placeholder="Aqu__ __onsum" />
+            </div>
+            <fieldset>
+                <legend class="ef-card__meta">Пропуски (id, допустимые через запятую, баллы)</legend>
+                @for (var i = 0; i < Form.Blanks.Count; i++)
+                {
+                    var index = i;
+                    <div class="ef-review-criterion">
+                        <input class="ef-input ef-input--short" @bind="Form.Blanks[index].Id" placeholder="b1" />
+                        <input class="ef-input" @bind="Form.Blanks[index].Accepted" placeholder="a, а" />
+                        <input type="number" class="ef-input ef-input--score" step="0.5" @bind="Form.Blanks[index].Points" />
+                        <button type="button" class="ef-button ef-button--sm ef-button--quiet" @onclick="() => Form.Blanks.RemoveAt(index)">Убрать</button>
+                    </div>
+                }
+                <button type="button" class="ef-button ef-button--sm ef-button--secondary" @onclick="() => Form.Blanks.Add(new())">+ пропуск</button>
+            </fieldset>
+        }
+
+        @if (_error is not null)
+        {
+            <p class="ef-form-error" role="alert">@_error</p>
+        }
+        <button class="ef-button ef-button--primary" type="submit" disabled="@_busy">
+            @(_editingQuestionId is null ? "Сохранить черновик" : "Сохранить изменения")
+        </button>
+        @if (_editingQuestionId is not null)
+        {
+            <button type="button" class="ef-button ef-button--quiet" @onclick="CancelEdit">Отменить правку</button>
+        }
+    </EditForm>
+</details>
+
+<h2>Мои задания</h2>
+@if (_questions.Count == 0)
+{
+    <div class="ef-callout ef-callout--info"><p>Заданий пока нет.</p></div>
+}
+else
+{
+    <div class="ef-form ef-form--inline">
+        <div class="ef-field">
+            <label for="q-filter-text">Поиск по формулировке</label>
+            <input id="q-filter-text" class="ef-input" @bind="_filterText" @bind:after="StateHasChanged"
+                   placeholder="латинский термин, слово…" autocomplete="off" />
+        </div>
+        <div class="ef-field">
+            <label for="q-filter-type">Тип</label>
+            <select id="q-filter-type" @bind="_filterType">
+                <option value="">все типы</option>
+                @foreach (var type in Enum.GetValues<QuestionType>())
+                {
+                    <option value="@type">@TypeText(type)</option>
+                }
+            </select>
+        </div>
+        @if (_filterText.Length > 0 || _filterType.Length > 0)
+        {
+            <button class="ef-button ef-button--sm ef-button--quiet" @onclick="ClearFilter">Сбросить</button>
+        }
+    </div>
+    @if (FilteredQuestions.Count == 0)
+    {
+        <div class="ef-callout ef-callout--info"><p>Ничего не найдено — измените условия поиска.</p></div>
+    }
+    else
+    {
+    <table class="ef-table">
+        <caption>Банк заданий</caption>
+        <thead>
+            <tr>
+                <th scope="col">Формулировка</th>
+                <th scope="col">Тип</th>
+                <th scope="col">Баллы</th>
+                <th scope="col">Версия</th>
+                <th scope="col">Статус</th>
+                <th scope="col"></th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var question in FilteredQuestions)
+            {
+                <tr>
+                    <td>@Truncate(question.Prompt)</td>
+                    <td>@TypeText(Enum.Parse<QuestionType>(question.Type))</td>
+                    <td>@question.MaxPoints.ToString("0.##")</td>
+                    <td>@question.VersionNumber</td>
+                    <td>@StatusText(question.Status)</td>
+                    <td>
+                        <div class="ef-actions">
+                            <button class="ef-button ef-button--sm ef-button--quiet" @onclick="() => StartEditAsync(question.QuestionId)">Правка</button>
+                            @if (question.Status is "Draft" or "Review")
+                            {
+                                <button class="ef-button ef-button--sm ef-button--primary"
+                                        @onclick="() => PublishAsync(question.QuestionId)">Опубликовать</button>
+                            }
+                            @if (question.Status == "Draft")
+                            {
+                                @if (_confirmDeleteQuestionId == question.QuestionId)
+                                {
+                                    <button class="ef-button ef-button--sm ef-button--danger"
+                                            @onclick="() => DeleteDraftAsync(question.QuestionId)">Точно удалить?</button>
+                                    <button class="ef-button ef-button--sm ef-button--quiet"
+                                            @onclick="() => _confirmDeleteQuestionId = null">Отмена</button>
+                                }
+                                else
+                                {
+                                    <button class="ef-button ef-button--sm ef-button--danger"
+                                            @onclick="() => _confirmDeleteQuestionId = question.QuestionId">Удалить</button>
+                            }
+                        }
+                        </div>
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+    }
+}
+
+@code {
+    private sealed class OptionRow { public string Text { get; set; } = ""; }
+    private sealed class FieldRow { public string Label { get; set; } = ""; public string Correct { get; set; } = ""; public decimal Points { get; set; } = 1m; }
+    private sealed class PairRow { public string Left { get; set; } = ""; public string Right { get; set; } = ""; }
+    private sealed class BlankRow { public string Id { get; set; } = "b1"; public string Accepted { get; set; } = ""; public decimal Points { get; set; } = 1m; }
+
+    private sealed class QuestionForm
+    {
+        [System.ComponentModel.DataAnnotations.Required(ErrorMessage = "Введите формулировку.")]
+        public string Prompt { get; set; } = "";
+        public string? Instruction { get; set; }
+        public QuestionType Type { get; set; } = QuestionType.SingleChoice;
+        [System.ComponentModel.DataAnnotations.Range(0.5, 1000)]
+        public decimal MaxPoints { get; set; } = 1m;
+        [System.ComponentModel.DataAnnotations.Range(5, 3600)]
+        public int TimeLimitSeconds { get; set; } = 40;
+        public List<OptionRow> Options { get; } = [];
+        public int CorrectOption { get; set; } = -1;
+        public List<bool> CorrectFlags { get; } = [];
+        public string Scoring { get; set; } = "AllOrNothing";
+        public string AcceptedText { get; set; } = "";
+        public bool IgnoreCase { get; set; } = true;
+        public bool IgnoreDiacritics { get; set; } = true;
+        public bool SendToReview { get; set; }
+        public List<FieldRow> Fields { get; } = [];
+        public List<PairRow> Pairs { get; } = [];
+        public string TargetWord { get; set; } = "";
+        public List<string> OrderItems { get; } = [];
+        public string GapText { get; set; } = "";
+        public List<BlankRow> Blanks { get; } = [];
+        public Guid? SubjectId { get; set; }
+    }
+
+    private QuestionForm Form { get; set; } = new();
+    private string _selectedTemplate = "";
+    private string _filterText = "";
+    private string _filterType = "";
+    private readonly List<(Guid Id, string Name)> _subjects = [];
+    private readonly List<QuestionVersionDto> _questions = [];
+    private string? _error;
+    private bool _busy;
+    private Guid? _editingQuestionId;
+    private Guid? _confirmDeleteQuestionId;
+
+    /// <summary>Клиентский фильтр банка: текст по формулировке + тип (без похода на сервер).</summary>
+    private IReadOnlyList<QuestionVersionDto> FilteredQuestions
+    {
+        get
+        {
+            IEnumerable<QuestionVersionDto> result = _questions;
+            if (_filterText.Length > 0)
+            {
+                var needle = _filterText.Trim();
+                result = result.Where(q => q.Prompt.Contains(needle, StringComparison.OrdinalIgnoreCase));
+            }
+            if (_filterType.Length > 0)
+                result = result.Where(q => q.Type == _filterType);
+            return [.. result];
+        }
+    }
+
+    private void ClearFilter()
+    {
+        _filterText = "";
+        _filterType = "";
+    }
+
+    protected override async Task OnInitializedAsync() => await ReloadAsync();
+
+    private async Task ReloadAsync()
+    {
+        _questions.Clear();
+        _questions.AddRange(await QuestionBank.ListAsync(await ActorAsync(), CancellationToken.None));
+        _subjects.Clear();
+        _subjects.AddRange((await Db.Subjects.AsNoTracking().OrderBy(s => s.Name).ToListAsync())
+            .Select(s => (s.Id, s.Name)));
+        Form.SubjectId ??= _subjects.FirstOrDefault().Id;
+    }
+
+    private void ApplyTemplate()
+    {
+        // «Без шаблона»: пустое задание любого типа вручную.
+        ResetFormFields();
+        if (string.IsNullOrEmpty(_selectedTemplate))
+            return;
+        var preset = MedicalTemplates.All.First(t => t.Code == _selectedTemplate);
+        Form.Type = preset.Type;
+        Form.Prompt = preset.Prompt;
+        Form.Instruction = preset.Instruction;
+        Form.MaxPoints = preset.Type is QuestionType.Matching ? 4m : 1m;
+        if (preset.Type is QuestionType.SingleChoice)
+            for (var i = 0; i < 3; i++) Form.Options.Add(new OptionRow());
+        if (preset.Type is QuestionType.MultipleChoice)
+            for (var i = 0; i < 4; i++) { Form.Options.Add(new OptionRow()); Form.CorrectFlags.Add(false); }
+        if (preset.Type is QuestionType.Structured)
+        {
+            Form.Fields.Add(new FieldRow { Label = "Форма", Correct = "liquid", Points = 0.5m });
+            Form.Fields.Add(new FieldRow { Label = "Род", Correct = "f", Points = 0.5m });
+            Form.MaxPoints = 1m;
+        }
+        if (preset.Type is QuestionType.Matching)
+            for (var i = 0; i < 4; i++) Form.Pairs.Add(new PairRow());
+        if (preset.Type is QuestionType.Ordering)
+        {
+            Form.OrderItems.AddRange(["post,", "non", "est", "philosophus"]);
+            Form.MaxPoints = 4m;
+        }
+        if (preset.Type is QuestionType.GapFill)
+        {
+            Form.GapText = "Aqu__ __onsum";
+            Form.Blanks.Add(new BlankRow { Id = "b1", Accepted = "a", Points = 0.5m });
+            Form.Blanks.Add(new BlankRow { Id = "b2", Accepted = "c", Points = 0.5m });
+        }
+    }
+
+    private void AddOption()
+    {
+        Form.Options.Add(new OptionRow());
+        if (Form.Type == QuestionType.MultipleChoice)
+            Form.CorrectFlags.Add(false);
+    }
+
+    private void AddOrderItem() => Form.OrderItems.Add("");
+
+    private void ResetFormFields()
+    {
+        Form.Prompt = "";
+        Form.Instruction = null;
+        Form.Options.Clear();
+        Form.CorrectOption = -1;
+        Form.CorrectFlags.Clear();
+        Form.Fields.Clear();
+        Form.Pairs.Clear();
+        Form.OrderItems.Clear();
+        Form.Blanks.Clear();
+        Form.TargetWord = "";
+        Form.AcceptedText = "";
+        Form.GapText = "";
+        Form.Scoring = "AllOrNothing";
+    }
+
+    private bool IsCorrect(int index)
+        => Form.Type == QuestionType.SingleChoice ? Form.CorrectOption == index : Form.CorrectFlags.Count > index && Form.CorrectFlags[index];
+
+    private string InputKind() => Form.Type == QuestionType.SingleChoice ? "radio" : "checkbox";
+
+    private static string Truncate(string prompt) => prompt.Length > 80 ? prompt[..80] + "…" : prompt;
+
+    private void ToggleCorrect(int index)
+    {
+        if (Form.Type == QuestionType.SingleChoice)
+            Form.CorrectOption = index;
+        else if (Form.CorrectFlags.Count > index)
+            Form.CorrectFlags[index] = !Form.CorrectFlags[index];
+    }
+
+    private static void Move<T>(List<T> list, int index, int delta)
+    {
+        var target = index + delta;
+        if (target < 0 || target >= list.Count) return;
+        (list[index], list[target]) = (list[target], list[index]);
+    }
+
+    private async Task SaveAsync()
+    {
+        _busy = true;
+        _error = null;
+        try
+        {
+            if (Form.SubjectId is not { } subjectId) { _error = "Выберите предмет."; return; }
+            var definition = BuildDefinition();
+            if (_editingQuestionId is { } questionId)
+            {
+                // Правка опубликованного создаёт новую редакцию (AC-15), снимки в тестах не меняются.
+                await QuestionBank.EditAsync(await ActorAsync(), questionId, definition, CancellationToken.None);
+                _editingQuestionId = null;
+                _selectedTemplate = "";
+            }
+            else
+            {
+                await QuestionBank.CreateDraftAsync(await ActorAsync(), subjectId, definition, CancellationToken.None);
+            }
+            Form = new QuestionForm();
+            Form.SubjectId = subjectId;
+            await ReloadAsync();
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally { _busy = false; }
+    }
+
+    /// <summary>Загрузка задания в форму для правки: обратное отображение BuildDefinition.</summary>
+    private async Task StartEditAsync(Guid questionId)
+    {
+        _error = null;
+        try
+        {
+            var (id, subjectId, d) = await QuestionBank.GetForEditAsync(await ActorAsync(), questionId, CancellationToken.None);
+            _editingQuestionId = id;
+            _selectedTemplate = "";
+            Form = new QuestionForm { SubjectId = subjectId };
+            Form.Type = d.Type;
+            Form.Prompt = d.Prompt;
+            Form.Instruction = d.Instruction;
+            Form.MaxPoints = d.MaxPoints;
+            Form.TimeLimitSeconds = d.ProposedTimeLimitSeconds ?? 40;
+            foreach (var o in d.Options)
+                Form.Options.Add(new OptionRow { Text = o.Text });
+            if (d.Type == QuestionType.SingleChoice && d.CorrectOptionId is { } correct)
+                Form.CorrectOption = int.TryParse(correct.TrimStart('o'), out var n) ? n : -1;
+            if (d.Type == QuestionType.MultipleChoice)
+                foreach (var o in d.Options)
+                    Form.CorrectFlags.Add(d.CorrectOptionIds.Contains(o.OptionId));
+            Form.Scoring = d.MultipleChoiceScoring == MultipleChoiceScoring.PartialPerCorrect ? "PartialPerCorrect" : "AllOrNothing";
+            Form.AcceptedText = string.Join("; ", d.AcceptedAnswers.Select(a => a.Value));
+            Form.IgnoreCase = d.Normalization?.IgnoreCase ?? true;
+            Form.IgnoreDiacritics = d.Normalization?.IgnoreDiacritics ?? true;
+            Form.SendToReview = d.SendUnknownShortAnswersToReview;
+            foreach (var f in d.StructuredFields)
+                Form.Fields.Add(new FieldRow { Label = f.Label, Correct = f.CorrectValue, Points = f.Points });
+            foreach (var p in d.MatchingPairs)
+                Form.Pairs.Add(new PairRow { Left = p.LeftText, Right = p.RightText });
+            Form.TargetWord = d.TargetSequence ?? "";
+            Form.OrderItems.AddRange(d.OrderingItems.Select(o => o.Text));
+            Form.GapText = d.GapTextWithPlaceholders ?? "";
+            foreach (var b in d.GapBlanks)
+                Form.Blanks.Add(new BlankRow { Id = b.BlankId, Accepted = string.Join(", ", b.AcceptedValues), Points = b.Points });
+            // Форма ниже списка: раскрываем и приводим её в поле зрения.
+            await Js.InvokeVoidAsync("eval", "document.getElementById('q-editor')?.scrollIntoView({behavior:'smooth',block:'start'})");
+        }
+        catch (Exception ex) { _error = ex.Message; }
+    }
+
+    private void CancelEdit()
+    {
+        _editingQuestionId = null;
+        Form = new QuestionForm { SubjectId = Form.SubjectId };
+        _selectedTemplate = "";
+    }
+
+    private async Task DeleteDraftAsync(Guid questionId)
+    {
+        _error = null;
+        try
+        {
+            await QuestionBank.DeleteDraftAsync(await ActorAsync(), questionId, CancellationToken.None);
+            _confirmDeleteQuestionId = null;
+            if (_editingQuestionId == questionId)
+                CancelEdit();
+            await ReloadAsync();
+        }
+        catch (Exception ex) { _error = ex.Message; _confirmDeleteQuestionId = null; }
+    }
+
+    private QuestionDefinition BuildDefinition()
+    {
+        var orderItems = Form.OrderItems.Where(i => !string.IsNullOrWhiteSpace(i)).ToList();
+        return new QuestionDefinition
+        {
+            Type = Form.Type,
+            Prompt = Form.Prompt,
+            Instruction = string.IsNullOrWhiteSpace(Form.Instruction) ? null : Form.Instruction,
+            MaxPoints = Form.MaxPoints,
+            ProposedTimeLimitSeconds = Form.TimeLimitSeconds,
+            Options = [.. Form.Options.Select((o, i) => new OptionDef($"o{i}", o.Text))],
+            CorrectOptionId = Form.Type == QuestionType.SingleChoice && Form.CorrectOption >= 0 ? $"o{Form.CorrectOption}" : null,
+            CorrectOptionIds = Form.Type == QuestionType.MultipleChoice
+                ? [.. Form.Options.Select((o, i) => (o, i)).Where(x => IsCorrect(x.i)).Select(x => $"o{x.i}")]
+                : [],
+            MultipleChoiceScoring = Form.Scoring == "PartialPerCorrect"
+                ? MultipleChoiceScoring.PartialPerCorrect
+                : MultipleChoiceScoring.AllOrNothing,
+            AcceptedAnswers = Form.Type == QuestionType.ShortText
+                ? [.. Form.AcceptedText.Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).Select(a => new AcceptedAnswer(a))]
+                : [],
+            Normalization = new ShortTextNormalization
+            {
+                IgnoreCase = Form.IgnoreCase,
+                IgnoreDiacritics = Form.IgnoreDiacritics,
+            },
+            SendUnknownShortAnswersToReview = Form.SendToReview,
+            StructuredFields = [.. Form.Fields.Select((f, i) => new StructuredFieldDef($"f{i}", f.Label, f.Correct, f.Points))],
+            MatchingPairs = [.. Form.Pairs.Select((p, i) => new MatchingPairDef($"L{i}", p.Left, $"R{i}", p.Right))],
+            LetterTiles = string.IsNullOrWhiteSpace(Form.TargetWord)
+                ? []
+                : [.. DictionaryDraftFactory.BuildTiles(Form.TargetWord.Trim())],
+            TargetSequence = string.IsNullOrWhiteSpace(Form.TargetWord) ? null : Form.TargetWord.Trim(),
+            OrderingItems = [.. orderItems.Select((item, i) => new OptionDef($"o{i}", item))],
+            AcceptedOrders = orderItems.Count > 0
+                ? [Enumerable.Range(0, orderItems.Count).Select(i => $"o{i}").ToList()]
+                : [],
+            GapTextWithPlaceholders = string.IsNullOrWhiteSpace(Form.GapText) ? null : Form.GapText,
+            GapBlanks = [.. Form.Blanks.Select(b => new GapBlankDef(b.Id,
+                b.Accepted.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries), b.Points))],
+            RequiresManualReview = Form.Type == QuestionType.LongText,
+        };
+    }
+
+    private async Task PublishAsync(Guid questionId)
+    {
+        _error = null;
+        try
+        {
+            await QuestionBank.PublishAsync(await ActorAsync(), questionId, CancellationToken.None);
+            await ReloadAsync();
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+    }
+
+    private async Task<TeacherActor> ActorAsync()
+    {
+        var state = await AuthState.GetAuthenticationStateAsync();
+        var user = await UserManager.GetUserAsync(state.User)
+            ?? throw new InvalidOperationException("Нет пользователя.");
+        return new TeacherActor(user.Id, await UserManager.IsInRoleAsync(user, AppRoles.Administrator));
+    }
+
+    private static string StatusText(string status) => status switch
+    {
+        "Draft" => "черновик",
+        "Review" => "ревью",
+        "Published" => "опубликован",
+        "Archived" => "архив",
+        _ => status,
+    };
+
+    private static string TypeText(QuestionType type) => type switch
+    {
+        QuestionType.SingleChoice => "один ответ",
+        QuestionType.MultipleChoice => "несколько ответов",
+        QuestionType.ShortText => "короткий ответ",
+        QuestionType.LongText => "развёрнутый ответ",
+        QuestionType.Matching => "сопоставление",
+        QuestionType.LetterAssembly => "сборка термина",
+        QuestionType.Ordering => "порядок",
+        QuestionType.GapFill => "пропуски",
+        QuestionType.Structured => "структура",
+        _ => type.ToString(),
+    };
+}

@@ -1,0 +1,39 @@
+@inherits LayoutComponentBase
+
+<div class="ef-app">
+    <aside class="ef-rail" aria-label="Разделы кабинета">
+        <a class="ef-brand" href="/">
+            <span class="ef-brand-mark" aria-hidden="true">EF</span>
+            <span class="ef-brand-name">Exam&nbsp;Forge</span>
+        </a>
+        <nav class="ef-rail-nav" aria-label="Разделы кабинета">
+            <NavLink class="ef-rail-link" href="cabinet" Match="NavLinkMatch.All">Обзор</NavLink>
+            <span class="ef-rail-group" aria-hidden="true">Подготовка</span>
+            <NavLink class="ef-rail-link" href="cabinet/materials">Материалы</NavLink>
+            <NavLink class="ef-rail-link" href="cabinet/dictionary">Словарь</NavLink>
+            <NavLink class="ef-rail-link" href="cabinet/questions">Банк заданий</NavLink>
+            <span class="ef-rail-group" aria-hidden="true">Проведение</span>
+            <NavLink class="ef-rail-link" href="cabinet/tests">Тесты</NavLink>
+            <NavLink class="ef-rail-link" href="cabinet/assignments">Назначения</NavLink>
+            <NavLink class="ef-rail-link" href="cabinet/reviews">Проверка</NavLink>
+            <NavLink class="ef-rail-link" href="cabinet/results">Результаты</NavLink>
+            <span class="ef-rail-group" aria-hidden="true">Люди и сервис</span>
+            <NavLink class="ef-rail-link" href="cabinet/groups">Группы</NavLink>
+            <NavLink class="ef-rail-link" href="cabinet/settings">Настройки</NavLink>
+            <NavLink class="ef-rail-link" href="cabinet/help">Справка</NavLink>
+        </nav>
+        <div class="ef-rail-footer">
+            <button type="button" class="ef-theme-toggle" data-ef-theme-toggle aria-label="Переключить тему оформления">Тема</button>
+            <a class="ef-button ef-button--quiet ef-button--sm" href="account/logout">Выйти</a>
+        </div>
+    </aside>
+    <div class="ef-app-main">
+        @Body
+    </div>
+</div>
+
+<div id="blazor-error-ui" class="ef-error-ui" data-nosnippet>
+    <p>Произошла непредвиденная ошибка. Сохранённые на сервере ответы не потеряны.</p>
+    <a href="" class="reload">Перезагрузить</a>
+    <span class="dismiss" aria-hidden="true">🗙</span>
+</div>

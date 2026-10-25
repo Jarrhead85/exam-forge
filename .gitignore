@@ -1,0 +1,47 @@
+# Секреты и ключи — никогда не в Git (AGENTS.md: секреты вне Git)
+*.pem
+*.ppk
+*.key
+*.pfx
+.env
+.env.*
+!deploy/docker/env.example
+
+# Сборка .NET
+bin/
+obj/
+artifacts/
+publish/
+*.user
+*.suo
+
+# Локальные данные приложения и БД
+.storage/
+*.db
+*.db-shm
+*.db-wal
+backup-*.sql
+
+# Временные и служебные файлы разработки
+.tmp-*
+ERR
+$null
+deploy-patch.tar.gz
+
+# IDE / ОС
+.vs/
+.idea/
+Thumbs.db
+.DS_Store
+
+# Внутренние документы и служебные скрипты — в публичный репозиторий не входят
+# (файлы остаются только локально)
+/AGENTS.md
+/.zcodeignore
+/docs/TECHNICAL_SPECIFICATION.md
+/docs/BACKLOG.md
+/docs/PACKAGE_VALIDATION.md
+/docs/adr/
+/skills/
+/deploy/smoke-*
+/deploy/add-bom.ps1

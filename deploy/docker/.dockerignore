@@ -1,0 +1,21 @@
+# В контекст сборки не попадает мусор — образ меньше, сборка быстрее.
+# **/ — на любом уровне вложенности: иначе src/*/bin попадёт в контекст
+# и затрёт свежий restore в слоях Dockerfile (проявилось пропавшим blazor.web.js).
+**/bin/
+**/obj/
+.storage/
+.git/
+node_modules/
+tests/
+docs/
+design/
+skills/
+deploy/smoke-*.ps1
+*.user
+*.log
+*.sql
+*.pem
+*.ppk
+pubtest/
+ERR
+.tmp-*.ps1

@@ -1,0 +1,858 @@
+/* Exam Forge — базовые компоненты на канонических токенах (docs/UI_KIT.md).
+   Без bootstrap/CDN; значения только через var(--ef-*). */
+
+* { box-sizing: border-box; }
+
+html { height: 100%; }
+
+body {
+    margin: 0;
+    min-height: 100%;
+    background: var(--ef-bg);
+    color: var(--ef-ink);
+    font-family: var(--ef-font-body);
+    font-size: 16px;
+    line-height: 1.6;
+}
+
+h1, h2, h3, .ef-serif {
+    font-family: var(--ef-font-display);
+    font-weight: 400;
+    line-height: 1.2;
+    color: var(--ef-ink);
+}
+
+h1 { font-size: 32px; }
+h2 { font-size: 24px; }
+h3 { font-size: 20px; }
+@media (max-width: 639px) {
+    h1 { font-size: 28px; }
+    h2 { font-size: 22px; }
+}
+
+a { color: var(--ef-accent); }
+a:hover { color: var(--ef-accent-hover); }
+
+:focus-visible {
+    outline: 3px solid var(--ef-focus);
+    outline-offset: 2px;
+}
+
+/* ---------- Портал (публичные страницы) ---------- */
+
+.ef-portal-header {
+    display: flex;
+    align-items: center;
+    gap: var(--ef-space-5);
+    max-width: 1280px;
+    margin: 0 auto;
+    padding: var(--ef-space-4) var(--ef-space-5);
+    border-bottom: 1px solid var(--ef-border);
+}
+
+.ef-brand {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ef-space-3);
+    text-decoration: none;
+    color: var(--ef-ink);
+}
+
+.ef-brand-mark {
+    display: inline-grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    border: 1.5px solid var(--ef-ink);
+    border-radius: var(--ef-radius-sm);
+    font-family: var(--ef-font-display);
+    font-size: 15px;
+    color: var(--ef-ink);
+}
+
+.ef-brand-name {
+    font-family: var(--ef-font-display);
+    font-size: 20px;
+}
+
+.ef-portal-nav {
+    display: flex;
+    gap: var(--ef-space-4);
+    margin-left: auto;
+}
+
+.ef-portal-main {
+    max-width: 1280px;
+    margin: 0 auto;
+    padding: var(--ef-space-6) var(--ef-space-5) var(--ef-space-7);
+}
+
+.ef-portal-footer {
+    max-width: 1280px;
+    margin: 0 auto;
+    padding: var(--ef-space-4) var(--ef-space-5);
+    border-top: 1px solid var(--ef-border);
+    color: var(--ef-muted);
+    font-size: 13px;
+}
+
+/* ---------- Кабинет преподавателя ---------- */
+
+.ef-app {
+    display: grid;
+    grid-template-columns: 224px 1fr;
+    min-height: 100vh;
+}
+
+.ef-rail {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ef-space-5);
+    padding: var(--ef-space-5) var(--ef-space-4);
+    border-right: 1px solid var(--ef-border);
+    background: var(--ef-surface);
+}
+
+.ef-rail-nav {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.ef-rail-link {
+    display: flex;
+    align-items: center;
+    padding: var(--ef-space-2) var(--ef-space-3);
+    border-radius: var(--ef-radius-sm);
+    text-decoration: none;
+    color: var(--ef-ink);
+    min-height: 44px;
+}
+
+.ef-rail-link:hover {
+    background: var(--ef-soft);
+    color: var(--ef-ink);
+}
+
+.ef-rail-link.active {
+    background: var(--ef-soft);
+    box-shadow: inset 3px 0 0 var(--ef-accent);
+    font-weight: 600;
+}
+
+.ef-rail-footer {
+    margin-top: auto;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--ef-space-2);
+}
+
+/* Пошаговая инструкция проведения работы (Обзор). */
+.ef-howto {
+    margin: 0 0 var(--ef-space-3);
+    padding-left: var(--ef-space-5);
+    display: grid;
+    gap: var(--ef-space-2);
+}
+.ef-howto li { padding-left: var(--ef-space-2); }
+
+/* Индикатор подключения Blazor (кабинет/WASM): виден до готовности содержимого. */
+.ef-boot {
+    position: fixed;
+    right: var(--ef-space-4);
+    bottom: var(--ef-space-4);
+    display: flex;
+    align-items: center;
+    gap: var(--ef-space-2);
+    padding: var(--ef-space-2) var(--ef-space-4);
+    background: var(--ef-surface);
+    border: 1px solid var(--ef-border);
+    border-radius: var(--ef-radius-sm);
+    color: var(--ef-muted);
+    font-size: 13px;
+    box-shadow: 0 2px 8px rgb(0 0 0 / 12%);
+    z-index: 60;
+}
+.ef-boot__dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--ef-accent);
+    animation: ef-boot-pulse 1.2s ease-in-out infinite;
+}
+@keyframes ef-boot-pulse { 50% { opacity: 0.35; } }
+.ef-boot--failed { border-color: var(--ef-danger); color: var(--ef-danger); }
+.ef-boot--failed .ef-boot__dot { animation: none; background: var(--ef-danger); }
+@media (prefers-reduced-motion: reduce) {
+    .ef-boot__dot { animation: none; }
+}
+@media print {
+    .ef-boot { display: none; }
+}
+
+/* Видимый фокус с клавиатуры на всех интерактивных элементах (доступность, UI_KIT §5.2).
+   Один единый стиль: 3px focus-цвет — без вторых конкурирующих outline. */
+:focus-visible {
+    outline: 3px solid var(--ef-focus);
+    outline-offset: 2px;
+}
+
+/* Узкие экраны: широкие таблицы скроллятся горизонтально, а не ломают вёрстку. */
+@media (max-width: 767px) {
+    .ef-table {
+        display: block;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+}
+
+.ef-app-main {
+    width: 100%;
+    max-width: 1280px;
+    margin: 0 auto;
+    padding: var(--ef-space-6) var(--ef-space-6) var(--ef-space-7);
+}
+
+@media (max-width: 1023px) {
+    .ef-app { grid-template-columns: 1fr; }
+    .ef-rail {
+        flex-direction: row;
+        align-items: center;
+        flex-wrap: wrap;
+        border-right: none;
+        border-bottom: 1px solid var(--ef-border);
+    }
+    .ef-rail-nav { flex-direction: row; flex-wrap: wrap; }
+    .ef-rail-group { display: none; }
+    .ef-rail-footer { margin: 0 0 0 auto; flex-direction: row; align-items: center; }
+    .ef-app-main { padding: var(--ef-space-5) var(--ef-space-4); }
+}
+
+/* ---------- Кнопки ---------- */
+
+.ef-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--ef-space-2);
+    min-height: 44px;
+    padding: var(--ef-space-2) var(--ef-space-5);
+    border-radius: var(--ef-radius-sm);
+    border: 1px solid transparent;
+    font: inherit;
+    font-weight: 600;
+    font-size: 14px; /* Controls 14–16 по UI_KIT: один размер для всех кнопок (sm отличается только высотой) */
+    cursor: pointer;
+    text-decoration: none;
+    white-space: nowrap;
+    transition: background var(--ef-duration-fast) ease, border-color var(--ef-duration-fast) ease;
+}
+
+/* Ряды действий (ячейки таблиц, панели карточек): кнопки переносятся целиком,
+   а не налезают друг на друга на узких экранах. */
+.ef-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: var(--ef-space-2) var(--ef-space-3);
+}
+.ef-actions .ef-button { flex: 0 1 auto; }
+.ef-actions .ef-field { flex: 1 1 220px; min-width: 0; }
+
+.ef-button--primary {
+    background: var(--ef-accent);
+    color: #ffffff;
+}
+.ef-button--primary:hover { background: var(--ef-accent-hover); color: #ffffff; }
+
+.ef-button--secondary {
+    background: var(--ef-surface);
+    border-color: var(--ef-ink);
+    color: var(--ef-ink);
+}
+.ef-button--secondary:hover { background: var(--ef-soft); }
+
+.ef-button--quiet {
+    background: transparent;
+    color: var(--ef-accent);
+}
+.ef-button--quiet:hover { color: var(--ef-accent-hover); }
+
+/* Разрушающие действия (удаление): акцент опасности из токенов, не inline-значения. */
+.ef-button--danger {
+    background: var(--ef-surface);
+    border-color: var(--ef-danger);
+    color: var(--ef-danger);
+}
+.ef-button--danger:hover { background: var(--ef-danger-bg); }
+
+.ef-button--sm { min-height: 36px; padding: var(--ef-space-1) var(--ef-space-4); font-size: 14px; }
+
+.ef-button:disabled {
+    opacity: .55;
+    cursor: not-allowed;
+}
+
+.ef-theme-toggle {
+    background: transparent;
+    border: 1px solid var(--ef-border);
+    border-radius: var(--ef-radius-sm);
+    color: var(--ef-muted);
+    min-height: 36px;
+    padding: var(--ef-space-1) var(--ef-space-3);
+    cursor: pointer;
+    font: inherit;
+    font-size: 14px;
+}
+
+/* ---------- Карточки ---------- */
+
+.ef-card {
+    background: var(--ef-surface);
+    border: 1px solid var(--ef-border);
+    border-radius: var(--ef-radius-lg);
+    box-shadow: var(--ef-shadow-paper);
+    padding: var(--ef-space-5);
+}
+
+/* Поток разделов (UI_KIT §4: между разделами 32–48px): карточки-секции
+   основного содержимого не склеиваются. На grid-портал не влияет. */
+.ef-app-main section.ef-card,
+.ef-exam-main section.ef-card {
+    margin-bottom: var(--ef-space-6);
+}
+
+.ef-card__eyebrow {
+    font-size: 11px;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    font-weight: 600;
+    color: var(--ef-muted);
+    margin: 0 0 var(--ef-space-2);
+}
+
+.ef-card__title {
+    font-family: var(--ef-font-display);
+    font-size: 20px;
+    margin: 0 0 var(--ef-space-2);
+}
+
+.ef-card__meta {
+    color: var(--ef-muted);
+    font-size: 13px;
+    margin: 0 0 var(--ef-space-4);
+}
+
+.ef-hero {
+    max-width: 720px;
+    margin: 0 0 var(--ef-space-6);
+}
+
+.ef-hero h1 {
+    font-size: 44px;
+    margin: 0 0 var(--ef-space-4);
+}
+
+@media (max-width: 639px) {
+    .ef-hero h1 { font-size: 32px; }
+}
+
+/* ---------- Формы ---------- */
+
+.ef-form {
+    display: grid;
+    gap: var(--ef-space-4);
+    max-width: 480px;
+}
+
+/* Строчные формы: поля растягиваются по доступной ширине и переносятся;
+   на узких экранах каждое поле занимает всю строку (адаптив без брейкпоинтов на контент). */
+.ef-form--inline {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: var(--ef-space-3) var(--ef-space-4);
+    max-width: none;
+}
+.ef-form--inline .ef-field { flex: 1 1 240px; min-width: 0; }
+.ef-form--inline .ef-field--check { flex: 0 1 auto; }
+.ef-form--inline .ef-button { flex: 0 0 auto; }
+@media (max-width: 639px) {
+    .ef-form--inline .ef-field { flex-basis: 100%; }
+    .ef-form--inline .ef-button { flex: 1 1 auto; }
+}
+
+/* Группы разделов в боковой навигации: структура вместо плоского списка.
+   Подпись с тире-линией до края рейла — явная граница между разделами. */
+.ef-rail-group {
+    display: flex;
+    align-items: center;
+    gap: var(--ef-space-3);
+    margin-top: var(--ef-space-5);
+    padding: 0 var(--ef-space-3);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--ef-muted);
+}
+.ef-rail-group::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--ef-border);
+}
+
+/* Сворачиваемые блоки-карточки (редактор заданий): заголовок = кнопка раскрытия. */
+.ef-summary-toggle {
+    cursor: pointer;
+    user-select: none;
+}
+.ef-summary-toggle::-webkit-details-marker { color: var(--ef-muted); }
+details[open] > .ef-summary-toggle { margin-bottom: var(--ef-space-3); }
+
+.ef-field { display: grid; gap: var(--ef-space-1); }
+
+.ef-field label {
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.ef-field input, .ef-field select, .ef-field textarea {
+    min-height: 44px;
+    padding: var(--ef-space-2) var(--ef-space-3);
+    border: 1px solid var(--ef-muted);
+    border-radius: var(--ef-radius-sm);
+    background: var(--ef-paper);
+    color: var(--ef-ink);
+    font: inherit;
+}
+
+/* Голые контролы (в таблицах и строчных формах без обёртки .ef-field) получают те же
+   канонические стили — поле никогда не остаётся браузерным дефолтом (белым в тёмной теме). */
+.ef-form input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),
+.ef-form select,
+.ef-form textarea,
+.ef-table input:not([type="checkbox"]):not([type="radio"]),
+.ef-table select {
+    min-height: 44px;
+    padding: var(--ef-space-2) var(--ef-space-3);
+    border: 1px solid var(--ef-muted);
+    border-radius: var(--ef-radius-sm);
+    background: var(--ef-paper);
+    color: var(--ef-ink);
+    font: inherit;
+}
+
+/* Прямые дети строчной формы без .ef-field: растягиваются и переносятся как обычные поля. */
+.ef-form--inline > input:not([type="checkbox"]):not([type="radio"]),
+.ef-form--inline > select {
+    flex: 1 1 200px;
+    min-width: 0;
+}
+@media (max-width: 639px) {
+    .ef-form--inline > input:not([type="checkbox"]):not([type="radio"]),
+    .ef-form--inline > select { flex-basis: 100%; }
+}
+
+/* Фокус полей наследует единый глобальный :focus-visible (3px focus) — без дублей. */
+
+.ef-field .ef-field-error {
+    color: var(--ef-danger);
+    font-size: 13px;
+}
+
+/* Сообщения валидации EditForm: без них невалидная форма отменяла submit молча. */
+.validation-message {
+    color: var(--ef-danger);
+    font-size: 13px;
+}
+
+.ef-form-error {
+    border: 1px solid var(--ef-danger);
+    background: var(--ef-danger-bg);
+    color: var(--ef-danger);
+    border-radius: var(--ef-radius-sm);
+    padding: var(--ef-space-3);
+}
+
+/* ---------- Статусы (не только цвет: текст+иконка) ---------- */
+
+.ef-callout {
+    display: flex;
+    gap: var(--ef-space-3);
+    align-items: flex-start;
+    border-radius: var(--ef-radius-sm);
+    padding: var(--ef-space-3) var(--ef-space-4);
+    font-size: 14px;
+}
+
+.ef-callout::before { font-size: 16px; }
+
+.ef-callout--warning { background: var(--ef-warning-bg); color: var(--ef-warning); }
+.ef-callout--warning::before { content: "⚠"; }
+
+.ef-callout--info { background: var(--ef-soft); color: var(--ef-ink); }
+.ef-callout--info::before { content: "ℹ"; }
+
+.ef-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ef-space-1);
+    font-size: 13px;
+    padding: 4px 8px;
+    border-radius: var(--ef-radius-sm);
+    border: 1px solid var(--ef-border);
+    background: var(--ef-soft);
+    color: var(--ef-ink);
+}
+
+/* ---------- Таблицы ---------- */
+
+.ef-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+}
+
+.ef-table caption {
+    text-align: left;
+    color: var(--ef-muted);
+    padding-bottom: var(--ef-space-2);
+}
+
+.ef-table th, .ef-table td {
+    text-align: left;
+    padding: var(--ef-space-3);
+    border-bottom: 1px solid var(--ef-border);
+}
+
+.ef-table th { font-weight: 600; color: var(--ef-muted); }
+
+/* ---------- Error UI ---------- */
+
+.ef-error-ui {
+    background: var(--ef-danger-bg);
+    color: var(--ef-danger);
+    display: none;
+}
+
+.ef-error-ui.visible { display: block; }
+
+/* ---------- Студенческий exam shell (без teacher-навигации, ТЗ §18) ---------- */
+
+.ef-exam-header {
+    display: flex;
+    align-items: center;
+    gap: var(--ef-space-4);
+    padding: var(--ef-space-3) var(--ef-space-5);
+    border-bottom: 1px solid var(--ef-border);
+    background: var(--ef-surface);
+}
+
+.ef-exam-header__subject {
+    margin-left: auto;
+    color: var(--ef-muted);
+    font-size: 13px;
+}
+
+.ef-exam-main {
+    max-width: 820px;
+    margin: 0 auto;
+    padding: var(--ef-space-5) var(--ef-space-4) var(--ef-space-7);
+}
+
+.ef-exam-statusbar {
+    display: flex;
+    align-items: center;
+    gap: var(--ef-space-3);
+    margin-bottom: var(--ef-space-4);
+    flex-wrap: wrap;
+}
+
+.ef-exam-save-state {
+    margin-left: auto;
+    font-size: 13px;
+    color: var(--ef-muted);
+    min-height: 20px;
+}
+
+.ef-exam-actions {
+    display: flex;
+    gap: var(--ef-space-3);
+    margin-top: var(--ef-space-5);
+    justify-content: flex-end;
+}
+
+.ef-exam-score { font-size: 24px; }
+
+.ef-badge--warning {
+    background: var(--ef-warning-bg);
+    color: var(--ef-warning);
+    border-color: var(--ef-warning);
+}
+
+.ef-exam-editor.is-disabled {
+    pointer-events: none;
+    opacity: .7;
+}
+
+.ef-choice-list {
+    border: none;
+    padding: 0;
+    margin: 0;
+    display: grid;
+    gap: var(--ef-space-2);
+}
+
+.ef-choice-option {
+    display: flex;
+    align-items: center;
+    gap: var(--ef-space-3);
+    min-height: 44px;
+    padding: var(--ef-space-2) var(--ef-space-3);
+    border: 1px solid var(--ef-border);
+    border-radius: var(--ef-radius-sm);
+    background: var(--ef-paper);
+    cursor: pointer;
+}
+
+.ef-choice-option:has(input:checked) {
+    border-color: var(--ef-accent);
+    box-shadow: inset 3px 0 0 var(--ef-accent);
+}
+
+.ef-choice-option input { width: 20px; height: 20px; }
+
+.ef-input {
+    min-height: 44px;
+    padding: var(--ef-space-2) var(--ef-space-3);
+    border: 1px solid var(--ef-muted);
+    border-radius: var(--ef-radius-sm);
+    background: var(--ef-paper);
+    color: var(--ef-ink);
+    font: inherit;
+    width: 100%;
+}
+
+.ef-matching {
+    display: grid;
+    gap: var(--ef-space-3);
+}
+
+.ef-matching-col {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: var(--ef-space-2);
+}
+
+.ef-matching-item {
+    min-height: 44px;
+    padding: var(--ef-space-2) var(--ef-space-3);
+    border: 1px solid var(--ef-border);
+    border-radius: var(--ef-radius-sm);
+    background: var(--ef-paper);
+    color: var(--ef-ink);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.ef-matching-item.is-selected {
+    border-color: var(--ef-accent);
+    box-shadow: inset 3px 0 0 var(--ef-accent);
+}
+
+.ef-matching-bound { color: var(--ef-accent); }
+
+.ef-letters { display: grid; gap: var(--ef-space-4); }
+
+.ef-letters-slots {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--ef-space-2);
+}
+
+.ef-letter-slot {
+    width: 44px;
+    height: 44px;
+    border: 1px solid var(--ef-muted);
+    border-bottom: 3px solid var(--ef-accent);
+    border-radius: var(--ef-radius-sm);
+    background: var(--ef-paper);
+    color: var(--ef-ink);
+    font-family: var(--ef-font-display);
+    font-size: 20px;
+    cursor: pointer;
+}
+
+.ef-letters-source {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--ef-space-2);
+}
+
+.ef-letter-tile {
+    min-width: 44px;
+    height: 44px;
+    border: 1px solid var(--ef-border);
+    border-radius: var(--ef-radius-sm);
+    background: var(--ef-soft);
+    color: var(--ef-ink);
+    font-family: var(--ef-font-display);
+    font-size: 20px;
+    cursor: pointer;
+}
+
+.ef-ordering {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: var(--ef-space-2);
+}
+
+.ef-ordering-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--ef-space-3);
+    min-height: 48px;
+    padding: var(--ef-space-2) var(--ef-space-3);
+    border: 1px solid var(--ef-border);
+    border-radius: var(--ef-radius-sm);
+    background: var(--ef-paper);
+}
+
+.ef-ordering-controls { display: flex; gap: var(--ef-space-1); }
+
+.ef-gaps { display: grid; gap: var(--ef-space-4); max-width: 480px; }
+
+@media print {
+    .ef-exam-statusbar, .ef-exam-actions { display: none !important; }
+}
+
+/* ---------- Табы входа студента ---------- */
+
+.ef-tabs {
+    display: flex;
+    gap: var(--ef-space-1);
+    margin-bottom: var(--ef-space-4);
+    border-bottom: 1px solid var(--ef-border);
+}
+
+.ef-tab {
+    background: transparent;
+    border: none;
+    border-bottom: 3px solid transparent;
+    padding: var(--ef-space-2) var(--ef-space-3);
+    font: inherit;
+    font-weight: 600;
+    color: var(--ef-muted);
+    cursor: pointer;
+    min-height: 44px;
+}
+
+.ef-tab:hover { color: var(--ef-ink); }
+
+.ef-tab.is-active {
+    color: var(--ef-accent);
+    border-bottom-color: var(--ef-accent);
+}
+
+.ef-mono {
+    font-family: var(--ef-font-mono);
+    font-size: 12px;
+}
+
+/* ---------- Проверка работ (teacher) ---------- */
+
+.ef-review-pair {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--ef-space-4);
+    margin: var(--ef-space-3) 0;
+}
+
+@media (max-width: 639px) {
+    .ef-review-pair { grid-template-columns: 1fr; }
+}
+
+.ef-review-key {
+    background: var(--ef-soft);
+    border-radius: var(--ef-radius-sm);
+    padding: var(--ef-space-3);
+}
+
+.ef-review-criterion {
+    display: flex;
+    align-items: center;
+    gap: var(--ef-space-3);
+    padding: var(--ef-space-2) 0;
+    border-top: 1px solid var(--ef-border);
+    flex-wrap: wrap;
+}
+
+.ef-input--score { max-width: 100px; min-height: 40px; }
+
+/* ---------- Диалог подтверждения (UI Kit §5.12: focus trap-подобное поведение, Esc безопасен) ---------- */
+
+.ef-dialog-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(23, 28, 32, .45);
+    display: grid;
+    place-items: center;
+    z-index: 50;
+}
+
+.ef-dialog {
+    background: var(--ef-surface);
+    border: 1px solid var(--ef-border);
+    border-radius: var(--ef-radius-lg);
+    box-shadow: var(--ef-shadow-paper);
+    max-width: 480px;
+    width: calc(100% - 32px);
+    padding: var(--ef-space-5);
+}
+
+/* ---------- Прочее ---------- */
+
+.ef-portal-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: var(--ef-space-5);
+}
+
+.ef-skip-link {
+    position: absolute;
+    left: -9999px;
+    top: 0;
+    background: var(--ef-paper);
+    color: var(--ef-ink);
+    padding: var(--ef-space-2) var(--ef-space-4);
+    border-radius: var(--ef-radius-sm);
+    z-index: 100;
+}
+
+.ef-skip-link:focus {
+    left: var(--ef-space-4);
+    top: var(--ef-space-4);
+}
+
+/* ---------- Motion / print ---------- */
+
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+    }
+}
+
+@media print {
+    .ef-portal-header, .ef-portal-footer, .ef-rail, .ef-theme-toggle { display: none !important; }
+    body { background: #ffffff; color: #000000; }
+}

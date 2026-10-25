@@ -1,0 +1,67 @@
+# Exam Forge — стек развёртывания (§21): отдельный project name/сеть/тома.
+# SugarGuard не затрагивается: своя сеть, своя БД в контейнере, порт 8080 наружу.
+name: examforge
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: examforge
+      POSTGRES_USER: examforge
+      POSTGRES_PASSWORD: ${EXAMFORGE_DB_PASSWORD:?Задайте EXAMFORGE_DB_PASSWORD в .env}
+      # ru_RU.UTF-8 недоступен в alpine-образе; база создаётся UTF8 по умолчанию.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+      TZ: Europe/Moscow
+    volumes:
+      - examforge-db:/var/lib/postgresql/data
+    networks:
+      - examforge
+    # Порт наружу НЕ публикуем (ТЗ §21.3): только внутренняя сеть examforge.
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U examforge -d examforge"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      # Пилот по IP без домена: HTTP, cookie SameAsRequest (перевод на домен+HTTPS — отдельно).
+      ExamForge__HttpsRedirection: "false"
+      ExamForge__Cookies__SecurePolicy: SameAsRequest
+      # Диагностика медленной загрузки (временно): транспорт и тайминги каждого circuit.
+      # Http.Connections — категория negotiate/транспорта (SignalR — только hub-уровень).
+      Logging__LogLevel__Microsoft.AspNetCore.Http.Connections: Debug
+      Logging__LogLevel__Microsoft.AspNetCore.SignalR: Debug
+      Logging__LogLevel__Microsoft.AspNetCore.Components.Server: Debug
+      ConnectionStrings__Default: "Host=db;Port=5432;Database=examforge;Username=examforge;Password=${EXAMFORGE_DB_PASSWORD}"
+      ExamForge__InvitationHmacKey: ${EXAMFORGE_HMAC_KEY:?Задайте EXAMFORGE_HMAC_KEY в .env}
+      ExamForge__RateLimits__ExchangePerMinute: "15"
+      EXAMFORGE_STORAGE_ROOT: /data/storage
+      TZ: Europe/Moscow
+    volumes:
+      - examforge-storage:/data/storage
+      - examforge-dataprotection:/root/.aspnet/DataProtection-Keys
+    networks:
+      - examforge
+    ports:
+      - "8080:8080" # заменить при конфликте порта (проверяется инвентаризацией)
+    mem_limit: 1536m
+
+volumes:
+  examforge-db:
+  examforge-storage:
+  examforge-dataprotection:
+
+networks:
+  examforge:
+    name: examforge

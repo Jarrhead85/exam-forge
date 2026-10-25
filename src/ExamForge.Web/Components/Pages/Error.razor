@@ -1,0 +1,25 @@
+@page "/Error"
+@using System.Diagnostics
+
+<PageTitle>Ошибка — Exam Forge</PageTitle>
+
+<h1>Что-то пошло не так</h1>
+<h2>При обработке запроса произошла ошибка. Сохранённые на сервере данные не потеряны.</h2>
+
+@if (ShowRequestId)
+{
+    <p>
+        <strong>Идентификатор запроса:</strong> <code>@RequestId</code>
+    </p>
+}
+
+@code{
+    [CascadingParameter]
+    private HttpContext? HttpContext { get; set; }
+
+    private string? RequestId { get; set; }
+    private bool ShowRequestId => !string.IsNullOrEmpty(RequestId);
+
+    protected override void OnInitialized() =>
+        RequestId = Activity.Current?.Id ?? HttpContext?.TraceIdentifier;
+}

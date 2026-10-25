@@ -1,0 +1,221 @@
+﻿@page "/cabinet/reviews/{attemptId:guid}"
+@layout Layout.TeacherLayout
+@attribute [Authorize]
+@* prerender: содержимое видно мгновенно; формы защищены submit-блокировщиком в App.razor *@
+@rendermode InteractiveServer
+@using ExamForge.Application.TeacherFlow
+@using ExamForge.Infrastructure.Identity
+@using ExamForge.Infrastructure.Services
+@using Microsoft.AspNetCore.Identity
+@inject ManualReviewService Reviews
+@inject UserManager<TeacherUser> UserManager
+@inject AuthenticationStateProvider AuthState
+@inject NavigationManager Navigation
+
+<PageTitle>Проверка работы — Exam Forge</PageTitle>
+
+@if (_attempt is null)
+{
+    <p class="ef-card__meta" aria-live="polite">@(_error ?? "Загрузка…")</p>
+}
+else
+{
+    <h1>@_attempt.StudentName @(_attempt.StudentGroup is { } g ? $"({g})" : "") — попытка №@_attempt.AttemptNumber</h1>
+    <p class="ef-card__meta">
+        Статус: @StatusText(_attempt.Status) · подтверждено @_attempt.ConfirmedEarned.ToString("0.##") из @_attempt.MaxPoints.ToString("0.##")
+    </p>
+
+    @if (_error is not null)
+    {
+        <p class="ef-form-error" role="alert">@_error</p>
+    }
+    @if (_saved)
+    {
+        <div class="ef-callout ef-callout--info"><p>Оценка сохранена.</p></div>
+    }
+
+    @foreach (var question in _attempt.Questions)
+    {
+        <section class="ef-card" aria-labelledby="rq-@question.QuestionSessionId">
+            <p class="ef-card__eyebrow">Задание @(question.OrderIndex + 1) · @TypeText(question.Type)</p>
+            <h2 id="rq-@question.QuestionSessionId" class="ef-card__title">@question.Prompt</h2>
+
+            <div class="ef-review-pair">
+                <div>
+                    <p class="ef-card__eyebrow">Ответ студента</p>
+                    <p>@question.AnswerDisplay</p>
+                </div>
+                @if (question.KeyDisplay is { } key)
+                {
+                    <div class="ef-review-key">
+                        <p class="ef-card__eyebrow">Ключ (только преподавателю)</p>
+                        <p>@key</p>
+                    </div>
+                }
+            </div>
+
+            @foreach (var criterion in question.Criteria)
+            {
+                <div class="ef-review-criterion">
+                    <span>@criterion.Label</span>
+                    @if (criterion.State == "PendingManual" && _attempt.Status is "PendingReview" or "Submitted")
+                    {
+                        <input type="number" class="ef-input ef-input--score" min="0" max="@criterion.MaxPoints"
+                               step="0.5"
+                               @bind="_scores[(question.QuestionSessionId, criterion.CriterionId)]" />
+                        <span>из @criterion.MaxPoints.ToString("0.##")</span>
+                    }
+                    else
+                    {
+                        <span class="ef-badge">@criterion.EarnedPoints.ToString("0.##") / @criterion.MaxPoints.ToString("0.##") · @criterion.State</span>
+                        @if (_attempt.Status == "Finalized")
+                        {
+                            <input type="number" class="ef-input ef-input--score" min="0" max="@criterion.MaxPoints" step="0.5"
+                                   @bind="_overrides[(question.QuestionSessionId, criterion.CriterionId)]" />
+                            <button class="ef-button ef-button--sm ef-button--quiet"
+                                    @onclick="() => OverrideAsync(question.QuestionSessionId, criterion)">
+                                Переоценить
+                            </button>
+                        }
+                    }
+                </div>
+            }
+        </section>
+    }
+
+    <div class="ef-exam-actions">
+        <a class="ef-button ef-button--quiet" href="cabinet/reviews">К очереди</a>
+        @if (_attempt.Status is "PendingReview" or "Submitted")
+        {
+            <button class="ef-button ef-button--primary" @onclick="SaveGradesAsync" disabled="@_busy">
+                Подтвердить оценку
+            </button>
+        }
+    </div>
+}
+
+@code {
+    [Parameter] public Guid AttemptId { get; set; }
+
+    private ReviewAttemptDto? _attempt;
+    private string? _error;
+    private bool _busy;
+    private bool _saved;
+    private readonly Dictionary<(Guid, string), decimal?> _scores = [];
+    private readonly Dictionary<(Guid, string), decimal?> _overrides = [];
+
+    protected override async Task OnInitializedAsync() => await ReloadAsync();
+
+    private async Task ReloadAsync()
+    {
+        try
+        {
+            _attempt = await Reviews.GetAttemptAsync(await ActorAsync(), AttemptId, CancellationToken.None);
+            InitScoreMaps();
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+    }
+
+    /// <summary>Оба словаря инициализируются по всем критериям: @bind в разметке читает
+    /// _overrides и для финализированных попыток — пустой словарь ронял страницу
+    /// (KeyNotFoundException при открытии проверки результата).</summary>
+    private void InitScoreMaps()
+    {
+        _scores.Clear();
+        _overrides.Clear();
+        foreach (var question in _attempt!.Questions)
+            foreach (var criterion in question.Criteria)
+            {
+                if (criterion.State == "PendingManual")
+                    _scores[(question.QuestionSessionId, criterion.CriterionId)] = null;
+                _overrides[(question.QuestionSessionId, criterion.CriterionId)] = null;
+            }
+    }
+
+    private async Task SaveGradesAsync()
+    {
+        _busy = true;
+        _error = null;
+        _saved = false;
+        try
+        {
+            var scores = new List<CriterionScoreDto>();
+            foreach (var (key, earned) in _scores)
+            {
+                if (earned is { } value)
+                    scores.Add(new CriterionScoreDto(key.Item1, key.Item2, value, "Ручная оценка преподавателя"));
+            }
+            if (scores.Count == 0)
+            {
+                _error = "Заполните баллы хотя бы одного критерия.";
+                return;
+            }
+            _attempt = await Reviews.GradeAsync(await ActorAsync(), AttemptId, scores, CancellationToken.None);
+            InitScoreMaps();
+            _saved = true;
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally { _busy = false; }
+    }
+
+    private async Task OverrideAsync(Guid questionSessionId, ReviewCriterionDto criterion)
+    {
+        _error = null;
+        try
+        {
+            if (_overrides.TryGetValue((questionSessionId, criterion.CriterionId), out var value) && value is { } earned)
+            {
+                _attempt = await Reviews.OverrideAsync(await ActorAsync(), AttemptId,
+                    new CriterionScoreDto(questionSessionId, criterion.CriterionId, earned,
+                        "Переоценка преподавателем"), CancellationToken.None);
+                InitScoreMaps();
+                _saved = true;
+            }
+            else
+            {
+                _error = "Введите новые баллы критерия.";
+            }
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+    }
+
+    private async Task<TeacherActor> ActorAsync()
+    {
+        var state = await AuthState.GetAuthenticationStateAsync();
+        var user = await UserManager.GetUserAsync(state.User)
+            ?? throw new InvalidOperationException("Нет пользователя.");
+        return new TeacherActor(user.Id, await UserManager.IsInRoleAsync(user, AppRoles.Administrator));
+    }
+
+    private static string StatusText(string status) => status switch
+    {
+        "InProgress" => "проходит",
+        "Submitted" => "сдана",
+        "PendingReview" => "на проверке",
+        "Finalized" => "итог подведён",
+        _ => status,
+    };
+
+    private static string TypeText(string type) => type switch
+    {
+        "SingleChoice" => "один ответ",
+        "MultipleChoice" => "несколько ответов",
+        "ShortText" => "короткий ответ",
+        "LongText" => "развёрнутый ответ",
+        "Matching" => "сопоставление",
+        "LetterAssembly" => "сборка термина",
+        "Ordering" => "порядок",
+        "GapFill" => "пропуски",
+        "Structured" => "структура",
+        _ => type,
+    };
+}

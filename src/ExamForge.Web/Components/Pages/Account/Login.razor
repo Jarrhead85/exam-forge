@@ -1,0 +1,60 @@
+﻿@page "/account/login"
+@layout Layout.MainLayout
+@using ExamForge.Infrastructure.Identity
+@inject SignInManager<TeacherUser> SignInManager
+@inject NavigationManager Navigation
+
+<PageTitle>Вход преподавателя — Exam Forge</PageTitle>
+
+<h1>Вход преподавателя</h1>
+
+<EditForm Model="Input" FormName="teacher-login" OnValidSubmit="LoginAsync" class="ef-form">
+    <DataAnnotationsValidator />
+    <div class="ef-field">
+        <label for="login">Логин</label>
+        <InputText id="login" @bind-Value="Input.Login" autocomplete="username" aria-required="true" />
+        <ValidationMessage For="() => Input.Login" />
+    </div>
+    <div class="ef-field">
+        <label for="password">Пароль</label>
+        <InputText id="password" type="password" @bind-Value="Input.Password" autocomplete="current-password" aria-required="true" />
+        <ValidationMessage For="() => Input.Password" />
+    </div>
+    @if (!string.IsNullOrEmpty(Error))
+    {
+        <p class="ef-form-error" role="alert">@Error</p>
+    }
+    <button class="ef-button ef-button--primary" type="submit">Войти</button>
+</EditForm>
+
+@code {
+    [SupplyParameterFromForm] private LoginInput Input { get; set; } = new();
+    private string? Error;
+
+    private sealed class LoginInput
+    {
+        [System.ComponentModel.DataAnnotations.Required(ErrorMessage = "Введите логин.")]
+        public string Login { get; set; } = string.Empty;
+
+        [System.ComponentModel.DataAnnotations.Required(ErrorMessage = "Введите пароль.")]
+        public string Password { get; set; } = string.Empty;
+    }
+
+    private async Task LoginAsync()
+    {
+        var result = await SignInManager.PasswordSignInAsync(
+            Input.Login.Trim(), Input.Password, isPersistent: true, lockoutOnFailure: true);
+        if (result.Succeeded)
+        {
+            // Абсолютный путь: в статическом SSR относительный Location даёт /account/cabinet.
+            Navigation.NavigateTo("/cabinet", forceLoad: true);
+            return;
+        }
+        if (result.IsLockedOut)
+        {
+            Error = "Вход временно заблокирован после нескольких неудачных попыток. Повторите позже.";
+            return;
+        }
+        Error = "Не удалось войти: проверьте логин и пароль.";
+    }
+}

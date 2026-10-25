@@ -1,0 +1,239 @@
+﻿@page "/cabinet/assignments"
+@layout Layout.TeacherLayout
+@attribute [Authorize]
+@* prerender: содержимое видно мгновенно; формы защищены submit-блокировщиком в App.razor *@
+@rendermode InteractiveServer
+@using ExamForge.Application.TeacherFlow
+@using ExamForge.Infrastructure.Identity
+@using ExamForge.Infrastructure.Persistence
+@using ExamForge.Infrastructure.Services
+@using Microsoft.AspNetCore.Identity
+@using Microsoft.EntityFrameworkCore
+@inject TeacherAssignmentsService AssignmentsService
+@inject ExamForgeDbContext Db
+@inject UserManager<TeacherUser> UserManager
+@inject AuthenticationStateProvider AuthState
+@inject NavigationManager Navigation
+
+<PageTitle>Назначения — Exam Forge</PageTitle>
+
+<h1>Назначения</h1>
+<p class="ef-card__meta">Работы, назначенные студентам: сроки, попытки, коды приглашений.</p>
+
+<section class="ef-card" aria-labelledby="create-title">
+    <h2 id="create-title" class="ef-card__title">Новое назначение</h2>
+    <p class="ef-card__meta">
+        Назначение связывает версию теста со студентами. После создания добавьте студентов в карточке
+        назначения и передайте каждому одноразовый код — студент введёт его на странице «Студентам» (<span class="ef-mono">/exam</span>).
+    </p>
+    @if (_versions.Count == 0)
+    {
+        <div class="ef-callout ef-callout--info">
+            <p>Нет опубликованных версий тестов. Путь: «Тесты» → собрать версию → «Опубликовать» → «Сгенерировать варианты». Затем вернитесь сюда.</p>
+        </div>
+    }
+    else
+    {
+        <EditForm Model="Form" OnValidSubmit="CreateAsync" class="ef-form">
+            <DataAnnotationsValidator />
+            <div class="ef-form ef-form--inline">
+                <div class="ef-field">
+                    <label for="a-version">Версия теста</label>
+                    <select id="a-version" @bind="Form.TestVersionId">
+                        @foreach (var version in _versions)
+                        {
+                            <option value="@version.Id">@version.Title</option>
+                        }
+                    </select>
+                </div>
+                <div class="ef-field">
+                    <label for="a-mode">Режим</label>
+                    <select id="a-mode" @bind="Form.Mode">
+                        <option value="Assessment">Контрольная</option>
+                        <option value="Practice">Тренировка</option>
+                    </select>
+                </div>
+                <div class="ef-field">
+                    <label for="a-attempts">Обычных попыток</label>
+                    <InputNumber id="a-attempts" @bind-Value="Form.MaxAttempts" min="1" max="10" />
+                </div>
+            </div>
+            <div class="ef-form ef-form--inline">
+                <div class="ef-field">
+                    <label for="a-opens">Открыто с</label>
+                    <input id="a-opens" type="datetime-local" @bind="Form.OpensLocal" />
+                </div>
+                <div class="ef-field">
+                    <label for="a-closes">Закрыть (необязательно)</label>
+                    <input id="a-closes" type="datetime-local" @bind="Form.ClosesLocal" />
+                </div>
+                <div class="ef-field">
+                    <label for="a-perq">Секунд на вопрос (необязательно)</label>
+                    <InputNumber id="a-perq" @bind-Value="Form.PerQuestionTimeLimitSeconds" min="5" max="3600" placeholder="из задания" />
+                    <p class="ef-card__meta">Пусто — у каждого вопроса своё время из банка заданий. Число — единое для всех вопросов этой работы.</p>
+                </div>
+                <div class="ef-field">
+                    <label for="a-total">Общий лимит попытки, минут (необязательно)</label>
+                    <InputNumber id="a-total" @bind-Value="Form.TotalTimeLimitMinutes" min="1" max="600" />
+                </div>
+            </div>
+            <div class="ef-field ef-field--check">
+                <label><input type="checkbox" @bind="Form.NoBacktracking" /> Запретить возврат к прошлым вопросам</label>
+            </div>
+            @if (_createError is not null)
+            {
+                <p class="ef-form-error" role="alert">@_createError</p>
+            }
+            <button class="ef-button ef-button--primary" type="submit" disabled="@_busy">Создать</button>
+        </EditForm>
+    }
+</section>
+
+<h2>Существующие</h2>
+@if (_assignments.Count == 0)
+{
+    <div class="ef-callout ef-callout--info"><p>Назначений пока нет.</p></div>
+}
+else
+{
+    <table class="ef-table">
+        <caption>Список назначений</caption>
+        <thead>
+            <tr>
+                <th scope="col">Тест</th>
+                <th scope="col">Режим</th>
+                <th scope="col">Открыто</th>
+                <th scope="col">Студентов</th>
+                <th scope="col">Попыток</th>
+                <th scope="col">Статус</th>
+                <th scope="col"></th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var a in _assignments)
+            {
+                <tr>
+                    <td>@a.TestTitle</td>
+                    <td>@(a.Mode == "Assessment" ? "Контрольная" : "Тренировка")</td>
+                    <td>@a.OpensAtUtc.LocalDateTime.ToString("dd.MM HH:mm")</td>
+                    <td>@a.StudentsInvited</td>
+                    <td>@a.AttemptsStarted / @a.MaxAttempts</td>
+                    <td>@(a.IsOpen ? "открыто" : "закрыто")</td>
+                    <td>
+                        <div class="ef-actions">
+                            <a class="ef-button ef-button--sm ef-button--secondary" href="@($"cabinet/assignments/{a.AssignmentId}")">Открыть</a>
+                            @if (_confirmDeleteId == a.AssignmentId)
+                            {
+                                <button class="ef-button ef-button--sm ef-button--danger" @onclick="() => DeleteAsync(a.AssignmentId)">Точно удалить?</button>
+                                <button class="ef-button ef-button--sm ef-button--quiet" @onclick="() => _confirmDeleteId = null">Отмена</button>
+                            }
+                            else
+                            {
+                                <button class="ef-button ef-button--sm ef-button--danger" @onclick="() => _confirmDeleteId = a.AssignmentId">Удалить</button>
+                            }
+                        </div>
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+
+@code {
+    private readonly List<TeacherAssignmentDto> _assignments = [];
+    private readonly List<(Guid Id, string Title)> _versions = [];
+    private CreateFormModel Form { get; set; } = new();
+    private string? _createError;
+    private bool _busy;
+    private Guid? _confirmDeleteId;
+
+    private sealed class CreateFormModel
+    {
+        [System.ComponentModel.DataAnnotations.Required]
+        public Guid? TestVersionId { get; set; }
+        public string Mode { get; set; } = "Assessment";
+        [System.ComponentModel.DataAnnotations.Range(1, 10)]
+        public int MaxAttempts { get; set; } = 2;
+        [System.ComponentModel.DataAnnotations.Range(5, 3600)]
+        public int? PerQuestionTimeLimitSeconds { get; set; }
+        public bool NoBacktracking { get; set; } = true;
+        public DateTime? ClosesLocal { get; set; }
+        public int? TotalTimeLimitMinutes { get; set; }
+        public DateTime? OpensLocal { get; set; }
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        await ReloadAsync();
+        // Переход «Создать назначение →» со страницы «Тесты»: предвыбираем версию из ?version=GUID.
+        var query = System.Web.HttpUtility.ParseQueryString(new Uri(Navigation.Uri).Query);
+        if (Guid.TryParse(query["version"], out var fromTests)
+            && _versions.Any(v => v.Id == fromTests))
+            Form.TestVersionId = fromTests;
+    }
+
+    private async Task ReloadAsync()
+    {
+        var actor = await ActorAsync();
+        _assignments.Clear();
+        _assignments.AddRange(await AssignmentsService.ListAssignmentsAsync(actor, CancellationToken.None));
+        _versions.Clear();
+        var versions = await Db.TestVersions.AsNoTracking()
+            .Where(v => v.PublishedAtUtc != null)
+            .OrderByDescending(v => v.CreatedAtUtc)
+            .Select(v => new { v.Id, v.Title })
+            .ToListAsync();
+        _versions.AddRange(versions.Select(v => (v.Id, v.Title)));
+        if (Form.TestVersionId is null && _versions.Count > 0)
+            Form.TestVersionId = _versions[0].Id;
+    }
+
+    private async Task<TeacherActor> ActorAsync()
+    {
+        var state = await AuthState.GetAuthenticationStateAsync();
+        var user = await UserManager.GetUserAsync(state.User)
+            ?? throw new InvalidOperationException("Нет пользователя.");
+        return new TeacherActor(user.Id, await UserManager.IsInRoleAsync(user, AppRoles.Administrator));
+    }
+
+    private async Task CreateAsync()
+    {
+        _busy = true;
+        _createError = null;
+        try
+        {
+            var actor = await ActorAsync();
+            var opensLocal = Form.OpensLocal ?? DateTime.Now;
+            DateTimeOffset? closesUtc = Form.ClosesLocal is { } closes
+                ? new DateTimeOffset(closes, TimeZoneInfo.Local.GetUtcOffset(closes))
+                : null;
+            var request = new CreateAssignmentRequest(
+                Form.TestVersionId!.Value, Form.Mode,
+                new DateTimeOffset(opensLocal, TimeZoneInfo.Local.GetUtcOffset(opensLocal)), closesUtc,
+                Form.MaxAttempts,
+                Form.PerQuestionTimeLimitSeconds,
+                Form.TotalTimeLimitMinutes is { } minutes ? minutes * 60 : null,
+                Form.NoBacktracking);
+            await AssignmentsService.CreateAssignmentAsync(actor, request, CancellationToken.None);
+            Form = new CreateFormModel();
+            await ReloadAsync();
+        }
+        catch (Exception ex)
+        {
+            _createError = ex.Message;
+        }
+        finally { _busy = false; }
+    }
+
+    private async Task DeleteAsync(Guid assignmentId)
+    {
+        _createError = null;
+        try
+        {
+            await AssignmentsService.DeleteAssignmentAsync(await ActorAsync(), assignmentId, CancellationToken.None);
+            _confirmDeleteId = null;
+            await ReloadAsync();
+        }
+        catch (Exception ex) { _createError = ex.Message; _confirmDeleteId = null; }
+    }
+}

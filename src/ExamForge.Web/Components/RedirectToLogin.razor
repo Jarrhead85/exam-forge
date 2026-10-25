@@ -1,0 +1,10 @@
+@inject NavigationManager Navigation
+
+@code {
+    protected override void OnInitialized()
+    {
+        // При статическом SSR NavigationManager кидает NavigationException,
+        // который фреймворк преобразует в редирект.
+        Navigation.NavigateTo($"/account/login?returnUrl={Uri.EscapeDataString(Navigation.Uri)}");
+    }
+}

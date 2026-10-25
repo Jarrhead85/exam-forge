@@ -1,0 +1,178 @@
+﻿@page "/print/variant/{variantId:guid}/student"
+@layout Layout.PrintLayout
+@attribute [Authorize]
+@using ExamForge.Application.Printing
+@using ExamForge.Application.TeacherFlow
+@using ExamForge.Infrastructure.Identity
+@using ExamForge.Infrastructure.Printing
+@using ExamForge.Infrastructure.Services
+@using Microsoft.AspNetCore.Identity
+@using Microsoft.AspNetCore.Components.Web
+@inject PrintViewBuilder Print
+@inject TestVersionService TestVersions
+@inject UserManager<TeacherUser> UserManager
+@inject AuthenticationStateProvider AuthState
+
+<PageTitle>Лист студента — Exam Forge</PageTitle>
+
+@if (_sheet is not null)
+{
+        <article class="print-sheet" aria-labelledby="sheet-title">
+            <h1 id="sheet-title">@_sheet.TestTitle</h1>
+            <p class="print-sheet__codes">
+                ЛИСТ СТУДЕНТА · версия @_sheet.TestVersionId.ToString()[..8] · вариант №@_sheet.VariantNumber ·
+                @(ShowPoints ? $"всего баллов: {_sheet.TotalPoints:0.##}" : "")
+            </p>
+            <div class="print-sheet__fields">
+                <div class="print-sheet__field"><span>Фамилия, имя:</span><span class="print-sheet__field-line"></span></div>
+                <div class="print-sheet__field"><span>Группа:</span><span class="print-sheet__field-line"></span></div>
+                <div class="print-sheet__field"><span>Дата:</span><span class="print-sheet__field-line"></span></div>
+            </div>
+
+            @foreach (var q in _sheet.Questions)
+            {
+                <section class="print-q" aria-label="Задание @q.Number">
+                    <div class="print-q__head">
+                        <span class="print-q__number">@q.Number.</span>
+                        <span class="print-q__prompt">@q.Prompt</span>
+                        <span class="print-q__points">@PointsText(q.MaxPoints)</span>
+                    </div>
+                    @if (!string.IsNullOrEmpty(q.Instruction))
+                    {
+                        <p>@q.Instruction</p>
+                    }
+                    @if (q.Options.Count > 0)
+                    {
+                        <ul class="print-options">
+                            @foreach (var option in q.Options)
+                            {
+                                <li class="print-option">
+                                    <span class="print-option__marker">@option.Marker)</span>
+                                    <span>@option.Text</span>
+                                </li>
+                            }
+                        </ul>
+                    }
+                    @if (q.MatchingLeft.Count > 0)
+                    {
+                        <div class="print-match">
+                            <div class="print-match__col">
+                                @foreach (var left in q.MatchingLeft)
+                                {
+                                    <span>@left.Marker. @left.Text → <span class="print-match__pairline"></span></span>
+                                }
+                            </div>
+                            <div class="print-match__col">
+                                @foreach (var right in q.MatchingRight)
+                                {
+                                    <span>@right.Marker) @right.Text</span>
+                                }
+                            </div>
+                        </div>
+                    }
+                    @if (q.Slots > 0)
+                    {
+                        <p>Соберите термин из букв: <span class="print-letters">@string.Join(" ", q.TileLetters)</span></p>
+                        <div class="print-slots">
+                            @for (var i = 0; i < q.Slots; i++)
+                            {
+                                <span class="print-slot"></span>
+                            }
+                        </div>
+                    }
+                    @if (q.OrderingItems.Count > 0)
+                    {
+                        <ul class="print-options">
+                            @foreach (var item in q.OrderingItems)
+                            {
+                                <li class="print-option"><span class="print-option__marker">@item.Marker)</span><span>@item.Text</span></li>
+                            }
+                        </ul>
+                        <p>Порядок:</p>
+                        <div class="print-order-line">
+                            @for (var i = 1; i <= q.OrderingItems.Count; i++)
+                            {
+                                <span class="print-order-cell">@i</span>
+                            }
+                        </div>
+                    }
+                    @if (q.BlankIds.Count > 0)
+                    {
+                        @foreach (var blank in q.BlankIds)
+                        {
+                            <div class="print-answer-line"></div>
+                        }
+                    }
+                    @if (q.Fields.Count > 0)
+                    {
+                        @foreach (var field in q.Fields)
+                        {
+                            <p>@field.Label:</p>
+                            <div class="print-answer-line"></div>
+                        }
+                    }
+                    @if (q.Type is "ShortText" or "LongText")
+                    {
+                        @if (q.Type == "ShortText")
+                        {
+                            <div class="print-answer-line"></div>
+                        }
+                        else
+                        {
+                            @for (var i = 0; i < 5; i++)
+                            {
+                                <div class="print-answer-line"></div>
+                            }
+                        }
+                    }
+                </section>
+            }
+
+            <footer class="print-footer">
+                <span>Exam Forge · студенту не передаются ключи</span>
+                <span>Вариант @_sheet.VariantNumber</span>
+            </footer>
+        </article>
+}
+else
+{
+    <p class="ef-card__meta">@(_error ?? "Загрузка…")</p>
+}
+
+@code {
+    [Parameter] public Guid VariantId { get; set; }
+
+    /// <summary>Опция печати: ?points=hidden скрывает баллы заданий и итог.</summary>
+    [SupplyParameterFromQuery(Name = "points")]
+    public string? PointsMode { get; set; }
+
+    private bool ShowPoints => !string.Equals(PointsMode, "hidden", StringComparison.OrdinalIgnoreCase);
+
+    private string PointsText(decimal maxPoints)
+        => ShowPoints ? $"{maxPoints:0.##} б." : "";
+
+    private StudentPrintSheetDto? _sheet;
+    private string? _error;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            var state = await AuthState.GetAuthenticationStateAsync();
+            var user = await UserManager.GetUserAsync(state.User);
+            if (user is null)
+            {
+                _error = "Требуется вход преподавателя.";
+                return;
+            }
+            var actor = new TeacherActor(user.Id, await UserManager.IsInRoleAsync(user, AppRoles.Administrator));
+            var (variant, testVersion, definitions) = await Print.LoadAsync(VariantId, CancellationToken.None);
+            await TestVersions.LoadOwnedVersionAsync(actor, testVersion.Id, CancellationToken.None); // проверка владения
+            _sheet = Print.BuildStudentSheet(variant, testVersion, definitions);
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+    }
+}

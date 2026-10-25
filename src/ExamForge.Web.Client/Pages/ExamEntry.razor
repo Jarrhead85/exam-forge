@@ -1,0 +1,319 @@
+@page "/exam"
+@layout StudentLayout
+@rendermode InteractiveWebAssembly
+@inject ExamApiClient Api
+@inject NavigationManager Navigation
+
+<PageTitle>Вход на работу — Exam Forge</PageTitle>
+
+@if (_assignments is null)
+{
+    <section class="ef-card" aria-labelledby="code-title">
+        <p class="ef-card__eyebrow">Студентам</p>
+        <h1 id="code-title" class="ef-card__title">@EntryTitle</h1>
+        <p class="ef-card__meta">@EntryHint</p>
+
+        @if (_linkCode is null)
+        {
+            <div class="ef-tabs" role="tablist" aria-label="Способ входа">
+                <button type="button" class="ef-tab @(_mode == EntryMode.Code ? "is-active" : "")"
+                        role="tab" aria-selected="@(_mode == EntryMode.Code)" @onclick="() => _mode = EntryMode.Code">Код приглашения</button>
+                <button type="button" class="ef-tab @(_mode == EntryMode.Account ? "is-active" : "")"
+                        role="tab" aria-selected="@(_mode == EntryMode.Account)" @onclick="() => _mode = EntryMode.Account">Логин и пароль</button>
+            </div>
+        }
+
+        @if (_linkCode is not null)
+        {
+            @* Общая ссылка: ФИО+группа перед стартом; персональные данные не сопоставляются с профилями. *@
+            <EditForm Model="LinkForm" OnValidSubmit="CommonLinkAsync" class="ef-form">
+                <DataAnnotationsValidator />
+                <div class="ef-field">
+                    <label for="l-last">Фамилия</label>
+                    <InputText id="l-last" @bind-Value="LinkForm.LastName" autocomplete="family-name" />
+                </div>
+                <div class="ef-field">
+                    <label for="l-first">Имя</label>
+                    <InputText id="l-first" @bind-Value="LinkForm.FirstName" autocomplete="given-name" />
+                </div>
+                <div class="ef-field">
+                    <label for="l-middle">Отчество (если есть)</label>
+                    <InputText id="l-middle" @bind-Value="LinkForm.MiddleName" autocomplete="additional-name" />
+                </div>
+                <div class="ef-field">
+                    <label for="l-group">Группа</label>
+                    <InputText id="l-group" @bind-Value="LinkForm.Group" autocomplete="off" />
+                </div>
+                @if (_error is not null)
+                {
+                    <p class="ef-form-error" role="alert">@_error</p>
+                }
+                <button class="ef-button ef-button--primary" type="submit" disabled="@_busy">
+                    @(_busy ? "Проверяем…" : "Продолжить")
+                </button>
+            </EditForm>
+        }
+        else if (_mode == EntryMode.Code)
+        {
+            <EditForm Model="Input" OnValidSubmit="ExchangeAsync" class="ef-form">
+                <DataAnnotationsValidator />
+                <div class="ef-field">
+                    <label for="exam-code">Код приглашения</label>
+                    <InputText id="exam-code" @bind-Value="Input.Code" autocomplete="one-time-code" placeholder="XXXX-XXXX-XXXX" />
+                </div>
+                @if (_error is not null)
+                {
+                    <p class="ef-form-error" role="alert">@_error</p>
+                }
+                <button class="ef-button ef-button--primary" type="submit" disabled="@_busy">
+                    @(_busy ? "Проверяем…" : "Продолжить")
+                </button>
+            </EditForm>
+        }
+        else
+        {
+            <EditForm Model="LoginForm" OnValidSubmit="LoginAsync" class="ef-form">
+                <DataAnnotationsValidator />
+                <div class="ef-field">
+                    <label for="acc-login">Логин</label>
+                    <InputText id="acc-login" @bind-Value="LoginForm.Login" autocomplete="username" />
+                </div>
+                <div class="ef-field">
+                    <label for="acc-password">Пароль</label>
+                    <InputText id="acc-password" type="password" @bind-Value="LoginForm.Password" autocomplete="current-password" />
+                </div>
+                @if (_error is not null)
+                {
+                    <p class="ef-form-error" role="alert">@_error</p>
+                }
+                <button class="ef-button ef-button--primary" type="submit" disabled="@_busy">
+                    @(_busy ? "Проверяем…" : "Войти")
+                </button>
+            </EditForm>
+        }
+        <p class="ef-card__meta"><a href="exam/help">Как это работает — справка студента</a></p>
+    </section>
+}
+else
+{
+    <h1>Доступные работы</h1>
+    <p>
+        <a href="exam/help">Справка студента</a> ·
+        <a href="exam/materials">Мои лекции (PDF)</a>
+    </p>
+    @if (_assignments.Count == 0)
+    {
+        <div class="ef-callout ef-callout--info">
+            <p>Пока нет назначенных работ. Если преподаватель только что выдал код — обновите страницу.</p>
+        </div>
+    }
+    @foreach (var assignment in _assignments)
+    {
+        <section class="ef-card ef-exam-assignment" aria-labelledby="a-@assignment.AssignmentId">
+            <p class="ef-card__eyebrow">@(assignment.Mode == "Assessment" ? "Контрольная" : "Тренировка")</p>
+            <h2 id="a-@assignment.AssignmentId" class="ef-card__title">@assignment.Title</h2>
+            <p class="ef-card__meta">
+                Попыток использовано: @assignment.UsedAttempts из @assignment.MaxAttempts.
+                @(assignment.ClosesAtUtc is { } closes ? $"До {closes.LocalDateTime:dd.MM.yyyy HH:mm}." : "")
+            </p>
+            @if (assignment.HasActiveAttempt)
+            {
+                <div class="ef-callout ef-callout--info"><p>У вас есть незавершённая попытка — продолжите её.</p></div>
+                <a class="ef-button ef-button--primary" href="@($"exam/run/{assignment.ActiveAttemptId}")">Продолжить</a>
+            }
+            else if (assignment.UsedAttempts >= assignment.MaxAttempts)
+            {
+                <div class="ef-callout ef-callout--warning"><p>Лимит попыток исчерпан. Дополнительную попытку выдаёт преподаватель.</p></div>
+            }
+            else
+            {
+                <button class="ef-button ef-button--primary" @onclick="() => StartAsync(assignment)">
+                    Начать @(_starting == assignment.AssignmentId ? "…" : "")
+                </button>
+            }
+
+            @if (assignment.Attempts.Count > 0)
+            {
+                <table class="ef-table">
+                    <caption>Мои попытки и результаты</caption>
+                    <thead>
+                        <tr><th scope="col">№</th><th scope="col">Статус</th><th scope="col">Баллы</th><th scope="col">%</th><th scope="col">Завершена</th><th scope="col"></th></tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var attempt in assignment.Attempts)
+                        {
+                            <tr>
+                                <td>@attempt.AttemptNumber</td>
+                                <td>@AttemptStatusText(attempt.Status)</td>
+                                <td>@(attempt.EarnedPoints is { } e ? $"{e:0.##} / {attempt.MaxPoints:0.##}" : "—")</td>
+                                <td>@(attempt.RoundedPercent?.ToString() ?? "—")</td>
+                                <td>@(attempt.CompletedAtUtc?.LocalDateTime.ToString("dd.MM HH:mm") ?? "—")</td>
+                                <td><a class="ef-button ef-button--sm ef-button--quiet" href="@($"exam/run/{attempt.AttemptId}")">Открыть</a></td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        </section>
+    }
+}
+
+@code {
+    private enum EntryMode { Code, Account }
+
+    private bool _busy;
+    private string? _error;
+    private Guid? _starting;
+    private IReadOnlyList<StudentAssignmentDto>? _assignments;
+    private EntryMode _mode = EntryMode.Code;
+    private string? _linkCode;
+
+    private InputModel Input { get; set; } = new();
+    private LoginFormModel LoginForm { get; set; } = new();
+    private LinkFormModel LinkForm { get; set; } = new();
+
+    private string EntryTitle => _linkCode is null ? "Вход на работу" : "Представьтесь перед началом";
+    private string EntryHint => _linkCode is null
+        ? "Код выдаёт преподаватель или используйте свой логин."
+        : "ФИО и группу увидит преподаватель в ведомости. Повторный вход по той же ссылке начнёт новую сессию.";
+
+    private sealed class InputModel
+    {
+        [System.ComponentModel.DataAnnotations.Required(ErrorMessage = "Введите код приглашения.")]
+        public string Code { get; set; } = string.Empty;
+    }
+
+    private sealed class LoginFormModel
+    {
+        [System.ComponentModel.DataAnnotations.Required(ErrorMessage = "Введите логин.")]
+        public string Login { get; set; } = string.Empty;
+        [System.ComponentModel.DataAnnotations.Required(ErrorMessage = "Введите пароль.")]
+        public string Password { get; set; } = string.Empty;
+    }
+
+    private sealed class LinkFormModel
+    {
+        [System.ComponentModel.DataAnnotations.Required(ErrorMessage = "Введите фамилию.")]
+        public string LastName { get; set; } = string.Empty;
+        [System.ComponentModel.DataAnnotations.Required(ErrorMessage = "Введите имя.")]
+        public string FirstName { get; set; } = string.Empty;
+        public string? MiddleName { get; set; }
+        [System.ComponentModel.DataAnnotations.Required(ErrorMessage = "Введите группу.")]
+        public string Group { get; set; } = string.Empty;
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        // /exam?link=CODE — общая ссылка преподавателя (ТЗ §5.1)
+        var query = new Uri(Navigation.Uri).Query;
+        var parsed = System.Web.HttpUtility.ParseQueryString(query);
+        var link = parsed["link"];
+        if (!string.IsNullOrWhiteSpace(link))
+            _linkCode = link.Trim();
+
+        if (!RendererInfo.IsInteractive)
+            return; // статический пререндер: данные загрузит интерактивный режим
+        try
+        {
+            _assignments = await Api.TryGetAssignmentsAsync();
+        }
+        catch (ExamSessionExpiredException)
+        {
+            _assignments = null;
+        }
+        catch (Exception)
+        {
+            _error = "Не удалось связаться с сервером. Проверьте соединение и обновите страницу.";
+        }
+    }
+
+    private async Task AfterAuthAsync()
+    {
+        _assignments = await Api.TryGetAssignmentsAsync();
+        _error = _assignments is null ? "Не удалось загрузить список работ." : null;
+    }
+
+    private async Task ExchangeAsync()
+    {
+        _busy = true;
+        _error = null;
+        try
+        {
+            _error = await Api.ExchangeAsync(Input.Code.Trim());
+            if (_error is null)
+                await AfterAuthAsync();
+        }
+        catch (Exception)
+        {
+            _error = "Нет связи с сервером. Повторите попытку.";
+        }
+        finally { _busy = false; }
+    }
+
+    private async Task CommonLinkAsync()
+    {
+        _busy = true;
+        _error = null;
+        try
+        {
+            _error = await Api.CommonLinkAsync(_linkCode!,
+                LinkForm.LastName.Trim(), LinkForm.FirstName.Trim(), LinkForm.MiddleName?.Trim(), LinkForm.Group.Trim());
+            if (_error is null)
+                await AfterAuthAsync();
+        }
+        catch (Exception)
+        {
+            _error = "Нет связи с сервером. Повторите попытку.";
+        }
+        finally { _busy = false; }
+    }
+
+    private async Task LoginAsync()
+    {
+        _busy = true;
+        _error = null;
+        try
+        {
+            _error = await Api.LoginAsync(LoginForm.Login.Trim(), LoginForm.Password);
+            if (_error is null)
+                await AfterAuthAsync();
+        }
+        catch (Exception)
+        {
+            _error = "Нет связи с сервером. Повторите попытку.";
+        }
+        finally { _busy = false; }
+    }
+
+    private async Task StartAsync(StudentAssignmentDto assignment)
+    {
+        _starting = assignment.AssignmentId;
+        try
+        {
+            var state = await Api.StartAttemptAsync(assignment.AssignmentId);
+            Navigation.NavigateTo($"exam/run/{state.AttemptId}");
+        }
+        catch (ExamApiException ex)
+        {
+            _error = ex.Message;
+        }
+        catch (ExamSessionExpiredException)
+        {
+            _assignments = null;
+        }
+        finally
+        {
+            _starting = null;
+        }
+    }
+
+    private static string AttemptStatusText(string status) => status switch
+    {
+        "InProgress" => "проходит",
+        "Submitted" => "сдана",
+        "PendingReview" => "на проверке",
+        "Finalized" => "итог подведён",
+        "Cancelled" => "отменена",
+        _ => status,
+    };
+}

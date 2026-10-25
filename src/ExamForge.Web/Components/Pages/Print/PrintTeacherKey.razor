@@ -1,0 +1,147 @@
+﻿@page "/print/variant/{variantId:guid}/teacher"
+@layout Layout.PrintLayout
+@attribute [Authorize]
+@using ExamForge.Application.Printing
+@using ExamForge.Application.TeacherFlow
+@using ExamForge.Infrastructure.Identity
+@using ExamForge.Infrastructure.Printing
+@using ExamForge.Infrastructure.Services
+@using Microsoft.AspNetCore.Identity
+@inject PrintViewBuilder Print
+@inject TestVersionService TestVersions
+@inject UserManager<TeacherUser> UserManager
+@inject AuthenticationStateProvider AuthState
+
+<PageTitle>Ключ преподавателя — Exam Forge</PageTitle>
+
+@if (_key is not null)
+{
+    <article class="print-sheet" aria-labelledby="key-title">
+        <h1 id="key-title">@_key.TestTitle — ключ преподавателя</h1>
+        <p class="print-sheet__codes">
+            КЛЮЧ · версия @_key.TestVersionId.ToString()[..8] · вариант №@_key.VariantNumber ·
+            всего баллов: @_key.TotalPoints.ToString("0.##")
+        </p>
+        <p><strong>Документ только для преподавателя. Студентам не передавать.</strong></p>
+
+        @foreach (var q in _key.Questions)
+        {
+            <section class="print-q" aria-label="Задание @q.Number">
+                <div class="print-q__head">
+                    <span class="print-q__number">@q.Number.</span>
+                    <span class="print-q__prompt">@q.Prompt</span>
+                    <span class="print-q__points">@q.MaxPoints.ToString("0.##") б.</span>
+                </div>
+
+                @if (q.Options.Count > 0)
+                {
+                    <ul class="print-options">
+                        @foreach (var option in q.Options)
+                        {
+                            <li class="print-option">
+                                <span class="print-option__marker">@option.Marker)</span>
+                                <span>@option.Text</span>
+                            </li>
+                        }
+                    </ul>
+                }
+                @if (q.MatchingLeft.Count > 0)
+                {
+                    <div class="print-match">
+                        <div class="print-match__col">
+                            @foreach (var left in q.MatchingLeft)
+                            {
+                                <span>@left.Marker. @left.Text</span>
+                            }
+                        </div>
+                        <div class="print-match__col">
+                            @foreach (var right in q.MatchingRight)
+                            {
+                                <span>@right.Marker) @right.Text</span>
+                            }
+                        </div>
+                    </div>
+                }
+                @if (q.OrderingItems.Count > 0)
+                {
+                    <ul class="print-options">
+                        @foreach (var item in q.OrderingItems)
+                        {
+                            <li class="print-option"><span class="print-option__marker">@item.Marker)</span><span>@item.Text</span></li>
+                        }
+                    </ul>
+                }
+                @if (q.TileLetters.Count > 0)
+                {
+                    <p>Буквы: <span class="print-letters">@string.Join(" ", q.TileLetters)</span></p>
+                }
+
+                <div class="print-key">
+                    <span class="print-key__title">Ключ</span>
+                    @if (!string.IsNullOrEmpty(q.KeyCorrectMarkers))
+                    {
+                        <div>@q.KeyCorrectMarkers</div>
+                    }
+                    @if (!string.IsNullOrEmpty(q.KeyPairs))
+                    {
+                        <div>@q.KeyPairs</div>
+                    }
+                    @if (!string.IsNullOrEmpty(q.KeySequence))
+                    {
+                        <div>@q.KeySequence</div>
+                    }
+                    @if (!string.IsNullOrEmpty(q.KeyOrders))
+                    {
+                        <div>Правильный порядок: @q.KeyOrders</div>
+                    }
+                    @if (!string.IsNullOrEmpty(q.KeyAcceptedValues))
+                    {
+                        <div>@q.KeyAcceptedValues</div>
+                    }
+                    @if (!string.IsNullOrEmpty(q.KeyNote))
+                    {
+                        <div>@q.KeyNote</div>
+                    }
+                </div>
+            </section>
+        }
+
+        <footer class="print-footer">
+            <span>Exam Forge · TeacherKey</span>
+            <span>Вариант @_key.VariantNumber</span>
+        </footer>
+    </article>
+}
+else
+{
+    <p class="ef-card__meta">@(_error ?? "Загрузка…")</p>
+}
+
+@code {
+    [Parameter] public Guid VariantId { get; set; }
+
+    private PrintSheetDto? _key;
+    private string? _error;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            var state = await AuthState.GetAuthenticationStateAsync();
+            var user = await UserManager.GetUserAsync(state.User);
+            if (user is null)
+            {
+                _error = "Требуется вход преподавателя.";
+                return;
+            }
+            var actor = new TeacherActor(user.Id, await UserManager.IsInRoleAsync(user, AppRoles.Administrator));
+            var (variant, testVersion, definitions) = await Print.LoadAsync(VariantId, CancellationToken.None);
+            await TestVersions.LoadOwnedVersionAsync(actor, testVersion.Id, CancellationToken.None);
+            _key = Print.BuildTeacherKey(variant, testVersion, definitions);
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+    }
+}

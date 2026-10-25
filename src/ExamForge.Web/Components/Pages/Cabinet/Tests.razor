@@ -1,0 +1,514 @@
+﻿@page "/cabinet/tests"
+@layout Layout.TeacherLayout
+@attribute [Authorize]
+@* prerender: содержимое видно мгновенно; формы защищены submit-блокировщиком в App.razor *@
+@rendermode InteractiveServer
+@using ExamForge.Application.TeacherFlow
+@using ExamForge.Domain.Questions
+@using ExamForge.Infrastructure.Identity
+@using ExamForge.Infrastructure.Persistence
+@using ExamForge.Infrastructure.Services
+@using Microsoft.AspNetCore.Identity
+@using Microsoft.EntityFrameworkCore
+@inject ExamForgeDbContext Db
+@inject TestVersionService TestVersions
+@inject UserManager<TeacherUser> UserManager
+@inject AuthenticationStateProvider AuthState
+
+<PageTitle>Тесты — Exam Forge</PageTitle>
+
+<h1>Тесты</h1>
+<p class="ef-card__meta">
+    Создание тестов из банка заданий, варианты с перемешиванием по seed и печать листов/ключей.
+</p>
+
+<section class="ef-card" aria-labelledby="new-test-title">
+    <h2 id="new-test-title" class="ef-card__title">Новый тест</h2>
+    @if (_subjects.Count == 0)
+    {
+        <div class="ef-callout ef-callout--info">
+            <p>Сначала создайте предмет в разделе «Настройки».</p>
+        </div>
+    }
+    else
+    {
+        <EditForm Model="TestForm" OnValidSubmit="CreateTestAsync" class="ef-form">
+            <DataAnnotationsValidator />
+            <div class="ef-form ef-form--inline">
+                <div class="ef-field">
+                    <label for="nt-title">Название</label>
+                    <InputText id="nt-title" @bind-Value="TestForm.Title" autocomplete="off" placeholder="Словарная контрольная №2" />
+                    <ValidationMessage For="() => TestForm.Title" />
+                </div>
+                <div class="ef-field">
+                    <label for="nt-subject">Предмет</label>
+                    <select id="nt-subject" @bind="TestForm.SubjectId">
+                        @foreach (var s in _subjects)
+                        {
+                            <option value="@s.Id">@s.Name</option>
+                        }
+                    </select>
+                </div>
+                <button class="ef-button ef-button--primary" type="submit" disabled="@_busy">Создать</button>
+            </div>
+        </EditForm>
+    }
+</section>
+
+@if (_tests.Count == 0)
+{
+    <div class="ef-callout ef-callout--info">
+        <p>Тестов пока нет — создайте первый выше.</p>
+    </div>
+}
+
+@foreach (var test in _tests)
+{
+    <section class="ef-card" aria-labelledby="t-@test.TestId">
+        @if (_editTestId == test.TestId)
+        {
+            <div class="ef-form ef-form--inline">
+                <div class="ef-field">
+                    <label for="@($"t-edit-{test.TestId}")">Название теста</label>
+                    <InputText id="@($"t-edit-{test.TestId}")" @bind-Value="_editTestTitle" autocomplete="off" />
+                </div>
+                <button class="ef-button ef-button--sm ef-button--primary" @onclick="() => RenameTestAsync(test.TestId)">Сохранить</button>
+                <button class="ef-button ef-button--sm ef-button--quiet" @onclick="() => _editTestId = null">Отмена</button>
+            </div>
+        }
+        else
+        {
+            <h2 id="t-@test.TestId" class="ef-card__title">@test.Title</h2>
+        }
+        <div class="ef-actions">
+            <button class="ef-button ef-button--sm ef-button--quiet" @onclick="() => StartTestEdit(test.TestId, test.Title)">Переименовать</button>
+            @if (_confirmDeleteTestId == test.TestId)
+            {
+                <button class="ef-button ef-button--sm ef-button--danger" @onclick="() => DeleteTestAsync(test.TestId)">Точно удалить тест?</button>
+                <button class="ef-button ef-button--sm ef-button--quiet" @onclick="() => _confirmDeleteTestId = null">Отмена</button>
+            }
+            else
+            {
+                <button class="ef-button ef-button--sm ef-button--danger" @onclick="() => _confirmDeleteTestId = test.TestId">Удалить тест</button>
+            }
+        </div>
+        @if (test.Versions.Count == 0)
+        {
+            <div class="ef-callout ef-callout--info">
+                <p>Версий нет. Соберите первую из опубликованных заданий банка — блок «Собрать новую версию» ниже раскрыт автоматически.</p>
+            </div>
+        }
+        @foreach (var version in test.Versions)
+        {
+            <div class="ef-review-criterion">
+                <span><strong>Версия @version.Number</strong> «@version.Title»</span>
+                <span class="ef-card__meta">заданий: @version.QuestionCount · баллов: @version.MaxPoints.ToString("0.##")</span>
+                @if (!version.IsPublished)
+                {
+                    <button class="ef-button ef-button--sm ef-button--primary" @onclick="() => PublishVersionAsync(version.VersionId)" disabled="@_busy">
+                        Опубликовать
+                    </button>
+                    <span class="ef-card__meta">публикация нужна до генерации вариантов</span>
+                }
+                else
+                {
+                    <span class="ef-badge">опубликована</span>
+                }
+            </div>
+
+            <div class="ef-form ef-form--inline">
+                <div class="ef-field">
+                    <label for="vc-@version.VersionId">Число вариантов</label>
+                    <input id="vc-@version.VersionId" type="number" min="1" max="20" @bind="version.FormCount" />
+                </div>
+                <div class="ef-field ef-field--check">
+                    <label><input type="checkbox" @bind="version.FormShuffleQuestions" /> Перемешивать порядок заданий</label>
+                </div>
+                <button class="ef-button ef-button--primary" @onclick="() => GenerateAsync(version)" disabled="@(_busy || !version.IsPublished)">
+                    Сгенерировать варианты
+                </button>
+                @if (version.Variants.Count > 0)
+                {
+                    <a class="ef-button ef-button--primary"
+                       href="@($"cabinet/assignments?version={version.VersionId}")">
+                        Создать назначение →
+                    </a>
+                }
+            </div>
+
+            @if (version.Variants.Count > 0)
+            {
+                <table class="ef-table">
+                    <caption>Варианты версии. «Лист студента» и «Ключ» — печать для проведения на бумаге; для онлайн-работы распечатки не нужны</caption>
+                    <thead>
+                        <tr><th scope="col">№</th><th scope="col">Заданий</th><th scope="col">Печать (бумажное проведение)</th></tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var variant in version.Variants)
+                        {
+                            <tr>
+                                <td>@variant.Number</td>
+                                <td>@variant.QuestionCount</td>
+                                <td>
+                                    <div class="ef-actions">
+                                        <a class="ef-button ef-button--sm ef-button--secondary"
+                                           href="@($"print/variant/{variant.Id}/student")" target="_blank">Лист студента</a>
+                                        <a class="ef-button ef-button--sm ef-button--secondary"
+                                           href="@($"print/variant/{variant.Id}/teacher")" target="_blank">Ключ</a>
+                                    </div>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+            else if (version.IsPublished)
+            {
+                <p class="ef-card__meta">Вариантов нет — сгенерируйте их выше, затем создайте назначение в разделе «Назначения».</p>
+            }
+        }
+
+        <details open="@(test.Versions.Count == 0)">
+            <summary class="ef-card__meta">Собрать новую версию из банка заданий</summary>
+            <p class="ef-card__meta">Только опубликованные задания (используется их последняя опубликованная версия). Отметьте нужные и укажите название версии.</p>
+            <div class="ef-field">
+                <label for="vt-@test.TestId">Название версии</label>
+                <input id="vt-@test.TestId" class="ef-input" @bind="test.NewVersionTitle" autocomplete="off" />
+            </div>
+            @if (_publishedQuestions.Count == 0)
+            {
+                <p class="ef-card__meta">Опубликованных заданий в банке нет — создайте их в разделе «Банк заданий».</p>
+            }
+            else
+            {
+                <table class="ef-table">
+                    <caption>Банк заданий (отметьте включаемые). Время — из каждого задания; меняется в «Банке заданий».</caption>
+                    <thead><tr><th scope="col"></th><th scope="col">Формулировка</th><th scope="col">Баллы</th><th scope="col">Время на вопрос</th></tr></thead>
+                    <tbody>
+                        @foreach (var q in _publishedQuestions)
+                        {
+                            <tr>
+                                <td><input type="checkbox" @bind="test.SelectedQuestions[q.VersionId]" /></td>
+                                <td>@Truncate(q.Prompt)</td>
+                                <td>@q.MaxPoints.ToString("0.##")</td>
+                                <td>@q.TimeLimitSeconds с</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+                <button class="ef-button ef-button--secondary" @onclick="() => CreateVersionAsync(test)" disabled="@_busy">
+                    Создать версию из отмеченных
+                </button>
+            }
+
+            <details>
+                <summary class="ef-card__meta">Blueprint-предпросмотр: сколько заданий банк даёт по типам</summary>
+                <div class="ef-form ef-form--inline">
+                    <div class="ef-field">
+                        <label for="bp-@test.TestId">Тип</label>
+                        <select id="bp-@test.TestId" @bind="_blueprintType">
+                            <option value="">любой</option>
+                            <option value="SingleChoice">один ответ</option>
+                            <option value="MultipleChoice">несколько ответов</option>
+                            <option value="ShortText">короткий ответ</option>
+                            <option value="LongText">развёрнутый</option>
+                            <option value="Matching">сопоставление</option>
+                            <option value="LetterAssembly">сборка</option>
+                            <option value="Ordering">порядок</option>
+                            <option value="GapFill">пропуски</option>
+                            <option value="Structured">структура</option>
+                        </select>
+                    </div>
+                    <div class="ef-field">
+                        <label for="bp-count-@test.TestId">Сколько нужно</label>
+                        <input id="bp-count-@test.TestId" type="number" min="1" max="50" @bind="_blueprintCount" />
+                    </div>
+                    <button class="ef-button ef-button--sm ef-button--secondary" @onclick="PreviewBlueprintAsync">
+                        Предпросмотр
+                    </button>
+                </div>
+                @if (_preview is not null)
+                {
+                    @foreach (var warning in _preview.Warnings)
+                    {
+                        <div class="ef-callout ef-callout--warning"><p>@warning</p></div>
+                    }
+                    <p class="ef-card__meta">Подобрано: @_preview.Picked.Count, сумма баллов: @_preview.TotalMaxPoints.ToString("0.##")</p>
+                    <ul>
+                        @foreach (var row in _preview.Picked)
+                        {
+                            <li>@row.Prompt <span class="ef-card__meta">(@row.Type, @row.MaxPoints.ToString("0.##") б.)</span></li>
+                        }
+                    </ul>
+                }
+            </details>
+        </details>
+    </section>
+}
+
+@if (_error is not null)
+{
+    <p class="ef-form-error" role="alert">@_error</p>
+}
+
+@code {
+    private sealed class TestRow
+    {
+        public required Guid TestId { get; init; }
+        public required string Title { get; init; }
+        public List<VersionRow> Versions { get; } = [];
+        public string NewVersionTitle { get; set; } = "Основная версия";
+        public Dictionary<Guid, bool> SelectedQuestions { get; } = [];
+    }
+
+    private sealed class VersionRow
+    {
+        public Guid VersionId { get; set; }
+        public int Number { get; set; }
+        public string Title { get; set; } = "";
+        public bool IsPublished { get; set; }
+        public int QuestionCount { get; set; }
+        public decimal MaxPoints { get; set; }
+        public List<(Guid Id, int Number, int QuestionCount)> Variants { get; } = [];
+        public int FormCount { get; set; } = 2;
+        public bool FormShuffleQuestions { get; set; }
+    }
+
+    private sealed class QuestionRow
+    {
+        public required Guid VersionId { get; init; }
+        public required string Prompt { get; init; }
+        public required decimal MaxPoints { get; init; }
+        public required int TimeLimitSeconds { get; init; }
+    }
+
+    private readonly List<TestRow> _tests = [];
+    private readonly List<(Guid Id, string Name)> _subjects = [];
+    private readonly List<QuestionRow> _publishedQuestions = [];
+    private TestFormModel TestForm { get; set; } = new();
+    private string? _error;
+    private bool _busy;
+    private string? _blueprintType;
+    private int _blueprintCount = 5;
+    private BlueprintPreviewDto? _preview;
+    private Guid? _editTestId;
+    private string _editTestTitle = string.Empty;
+    private Guid? _confirmDeleteTestId;
+
+    private void StartTestEdit(Guid testId, string title)
+    {
+        _editTestId = testId;
+        _editTestTitle = title;
+        _confirmDeleteTestId = null;
+        _error = null;
+    }
+
+    private async Task RenameTestAsync(Guid testId)
+    {
+        _error = null;
+        try
+        {
+            await TeacherTestsService.RenameTestAsync(Db, await ActorAsync(), testId, _editTestTitle.Trim(), CancellationToken.None);
+            _editTestId = null;
+            await ReloadAsync();
+        }
+        catch (Exception ex) { _error = ex.Message; }
+    }
+
+    private async Task DeleteTestAsync(Guid testId)
+    {
+        _error = null;
+        try
+        {
+            await TeacherTestsService.DeleteTestAsync(Db, await ActorAsync(), testId, CancellationToken.None);
+            _confirmDeleteTestId = null;
+            await ReloadAsync();
+        }
+        catch (Exception ex) { _error = ex.Message; _confirmDeleteTestId = null; }
+    }
+
+    private sealed class TestFormModel
+    {
+        [System.ComponentModel.DataAnnotations.Required(ErrorMessage = "Введите название.")]
+        public string Title { get; set; } = string.Empty;
+        public Guid? SubjectId { get; set; }
+    }
+
+    protected override async Task OnInitializedAsync() => await ReloadAsync();
+
+    private async Task ReloadAsync()
+    {
+        _error = null;
+        try
+        {
+            var actor = await ActorAsync();
+            _subjects.Clear();
+            _subjects.AddRange((await Db.Subjects.AsNoTracking().OrderBy(s => s.Name).ToListAsync())
+                .Select(s => (s.Id, s.Name)));
+            TestForm.SubjectId ??= _subjects.FirstOrDefault().Id;
+
+            _publishedQuestions.Clear();
+            // Версия теста собирается из ID версий заданий (QuestionVersions), а не из ID вопросов:
+            // берём последнюю версию каждого задания автора и оставляем только опубликованные.
+            var questionIds = await Db.Questions.AsNoTracking()
+                .Where(q => actor.IsAdministrator || q.AuthorTeacherId == actor.TeacherId)
+                .Select(q => q.Id)
+                .ToListAsync();
+            var latestVersions = (await Db.QuestionVersions.AsNoTracking()
+                    .Where(v => questionIds.Contains(v.QuestionId))
+                    .ToListAsync())
+                .GroupBy(v => v.QuestionId)
+                .Select(g => g.OrderByDescending(v => v.VersionNumber).First())
+                .ToList();
+            foreach (var v in latestVersions.Where(v => v.PublishedAtUtc != null))
+            {
+                var definition = QuestionDefinitionJson.Deserialize(v.DefinitionJson);
+                _publishedQuestions.Add(new QuestionRow { VersionId = v.Id, Prompt = definition.Prompt, MaxPoints = v.MaxPoints, TimeLimitSeconds = v.ProposedTimeLimitSeconds ?? 40 });
+            }
+
+            // Тесты автора + их версии + варианты: три батч-запроса без N+1.
+            Guid? authorId = actor.IsAdministrator ? null : actor.TeacherId;
+            var tests = await Db.Tests.AsNoTracking()
+                .Where(t => authorId == null || t.AuthorTeacherId == authorId)
+                .OrderByDescending(t => t.CreatedAtUtc)
+                .Select(t => new { t.Id, t.Title })
+                .ToListAsync();
+            var testIds = tests.Select(t => t.Id).ToList();
+
+            var versions = await Db.TestVersions.AsNoTracking()
+                .Where(v => testIds.Contains(v.TestId))
+                .OrderBy(v => v.VersionNumber)
+                .Select(v => new { v.Id, v.TestId, v.VersionNumber, v.Title, v.PublishedAtUtc, v.QuestionVersionIds, v.MaxPoints })
+                .ToListAsync();
+
+            var versionIds = versions.Select(v => v.Id).ToList();
+            var variants = await Db.Variants.AsNoTracking()
+                .Where(v => versionIds.Contains(v.TestVersionId))
+                .OrderBy(v => v.VariantNumber)
+                .Select(v => new { v.Id, v.TestVersionId, v.VariantNumber, QuestionCount = v.QuestionOrder.Count })
+                .ToListAsync();
+
+            _tests.Clear();
+            foreach (var t in tests)
+            {
+                var row = new TestRow { TestId = t.Id, Title = t.Title };
+                foreach (var v in versions.Where(v => v.TestId == t.Id))
+                {
+                    // Сохраняем пользовательский ввод (отметки, число вариантов) между перезагрузками.
+                    var old = _tests.SelectMany(x => x.Versions).FirstOrDefault(o => o.VersionId == v.Id);
+                    var vr = new VersionRow
+                    {
+                        VersionId = v.Id,
+                        Number = v.VersionNumber,
+                        Title = v.Title,
+                        IsPublished = v.PublishedAtUtc != null,
+                        QuestionCount = v.QuestionVersionIds.Count,
+                        MaxPoints = v.MaxPoints,
+                        FormCount = old?.FormCount ?? 2,
+                        FormShuffleQuestions = old?.FormShuffleQuestions ?? false,
+                    };
+                    vr.Variants.AddRange(variants
+                        .Where(x => x.TestVersionId == v.Id)
+                        .Select(x => (x.Id, x.VariantNumber, x.QuestionCount)));
+                    row.Versions.Add(vr);
+                }
+                _tests.Add(row);
+            }
+
+            // Инициализируем отметки банка заданий: ключи должны существовать до первого рендера чекбоксов.
+            foreach (var row in _tests)
+            {
+                foreach (var q in _publishedQuestions)
+                    row.SelectedQuestions.TryAdd(q.VersionId, false);
+            }
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+    }
+
+    private async Task CreateTestAsync()
+    {
+        _busy = true;
+        _error = null;
+        try
+        {
+            if (TestForm.SubjectId is not { } subjectId) { _error = "Выберите предмет."; return; }
+            var test = await TeacherTestsService.CreateTestAsync(Db, await ActorAsync(), TestForm.Title, subjectId, CancellationToken.None);
+            TestForm = new TestFormModel();
+            await ReloadAsync();
+        }
+        catch (Exception ex) { _error = ex.Message; }
+        finally { _busy = false; }
+    }
+
+    private async Task CreateVersionAsync(TestRow test)
+    {
+        _busy = true;
+        _error = null;
+        try
+        {
+            var selected = test.SelectedQuestions.Where(kv => kv.Value).Select(kv => kv.Key).ToList();
+            if (selected.Count == 0)
+            {
+                _error = "Отметьте хотя бы одно задание банка.";
+                return;
+            }
+            await TeacherTestsService.CreateVersionAsync(Db, await ActorAsync(), test.TestId,
+                test.NewVersionTitle, selected, CancellationToken.None);
+            await ReloadAsync();
+        }
+        catch (Exception ex) { _error = ex.Message; }
+        finally { _busy = false; }
+    }
+
+    private async Task PublishVersionAsync(Guid versionId)
+    {
+        _error = null;
+        try
+        {
+            await TeacherTestsService.PublishVersionAsync(Db, await ActorAsync(), versionId, CancellationToken.None);
+            await ReloadAsync();
+        }
+        catch (Exception ex) { _error = ex.Message; }
+    }
+
+    private async Task GenerateAsync(VersionRow version)
+    {
+        _busy = true;
+        _error = null;
+        try
+        {
+            var actor = await ActorAsync();
+            await TestVersions.GenerateVariantsAsync(actor, version.VersionId, version.FormCount, version.FormShuffleQuestions, CancellationToken.None);
+            await ReloadAsync();
+        }
+        catch (Exception ex) { _error = ex.Message; }
+        finally { _busy = false; }
+    }
+
+    private async Task PreviewBlueprintAsync()
+    {
+        _error = null;
+        _preview = null;
+        try
+        {
+            var actor = await ActorAsync();
+            var result = await TeacherTestsService.PreviewBlueprintAsync(Db, actor,
+                [new BlueprintLineRequest(_blueprintType, _blueprintCount)], $"preview:{_blueprintType}:{_blueprintCount}", CancellationToken.None);
+            _preview = result;
+        }
+        catch (Exception ex) { _error = ex.Message; }
+    }
+
+    private async Task<TeacherActor> ActorAsync()
+    {
+        var state = await AuthState.GetAuthenticationStateAsync();
+        var user = await UserManager.GetUserAsync(state.User)
+            ?? throw new InvalidOperationException("Нет пользователя.");
+        return new TeacherActor(user.Id, await UserManager.IsInRoleAsync(user, AppRoles.Administrator));
+    }
+
+    private static string Truncate(string prompt) => prompt.Length > 80 ? prompt[..80] + "…" : prompt;
+}

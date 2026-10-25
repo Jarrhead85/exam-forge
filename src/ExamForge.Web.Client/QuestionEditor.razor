@@ -1,0 +1,253 @@
+@* Универсальный редактор ответа по типу вопроса (ТЗ §7.2, §7.4).
+   Все действия — кнопки/поля: доступны с клавиатуры и тапом, drag не требуется. *@
+
+@if (Question.Type is "SingleChoice")
+{
+    <fieldset class="ef-choice-list">
+        <legend class="ef-card__meta">Выберите один вариант</legend>
+        @foreach (var option in Question.Options ?? [])
+        {
+            <label class="ef-choice-option">
+                <input type="radio" name="@($"q{Question.QuestionSessionId}")"
+                       value="@option.Id" checked="@(Selected == option.Id)"
+                       @onchange="() => SelectAsync(option.Id)" />
+                <span>@option.Text</span>
+            </label>
+        }
+    </fieldset>
+}
+else if (Question.Type is "MultipleChoice")
+{
+    <fieldset class="ef-choice-list">
+        <legend class="ef-card__meta">Выберите все подходящие варианты</legend>
+        @foreach (var option in Question.Options ?? [])
+        {
+            <label class="ef-choice-option">
+                <input type="checkbox" value="@option.Id"
+                       checked="@SelectedMulti.Contains(option.Id)"
+                       @onchange="e => ToggleAsync(option.Id, e.Value is true)" />
+                <span>@option.Text</span>
+            </label>
+        }
+    </fieldset>
+}
+else if (Question.Type is "ShortText")
+{
+    <div class="ef-field">
+        <label for="st-@Question.QuestionSessionId">Ответ</label>
+        <input id="st-@Question.QuestionSessionId" class="ef-input" @bind="Text"
+               @bind:after="ChangedAsync" autocomplete="off" />
+    </div>
+}
+else if (Question.Type is "LongText")
+{
+    <div class="ef-field">
+        <label for="lt-@Question.QuestionSessionId">Развёрнутый ответ</label>
+        <textarea id="lt-@Question.QuestionSessionId" class="ef-input" rows="6" @bind="Text"
+                  @bind:after="ChangedAsync"></textarea>
+    </div>
+}
+else if (Question.Type is "Matching")
+{
+    <div class="ef-matching">
+        <div class="ef-matching-col" aria-label="Термины">
+            @foreach (var left in Question.MatchingLeft ?? [])
+            {
+                <button type="button" class="ef-matching-item @(SelectedLeft == left.Id ? "is-selected" : "")"
+                        aria-pressed="@(SelectedLeft == left.Id)"
+                        @onclick="() => SelectLeft(left.Id)">
+                    @left.Text
+                    @if (Pairs.TryGetValue(left.Id, out var bound))
+                    {
+                        var rightText = (Question.MatchingRight ?? []).FirstOrDefault(r => r.Id == bound)?.Text;
+                        <span class="ef-matching-bound"> → @rightText</span>
+                    }
+                </button>
+            }
+        </div>
+        <div class="ef-matching-col" aria-label="Переводы">
+            @foreach (var right in Question.MatchingRight ?? [])
+            {
+                <button type="button" class="ef-matching-item" @onclick="() => AssignRight(right.Id)">
+                    @right.Text
+                </button>
+            }
+        </div>
+        <p class="ef-card__meta">Сначала выберите термин слева, затем перевод справа. Повторный клик по термину отменяет пару.</p>
+    </div>
+}
+else if (Question.Type is "LetterAssembly")
+{
+    <div class="ef-letters">
+        <div class="ef-letters-slots" aria-label="Собранный термин">
+            @for (var i = 0; i < Slots; i++)
+            {
+                var index = i;
+                <button type="button" class="ef-letter-slot"
+                        @onclick="() => RemoveAtAsync(index)"
+                        aria-label="@SlotLabel(index)">
+                    @SlotText(index)
+                </button>
+            }
+        </div>
+        <div class="ef-letters-source" aria-label="Доступные буквы">
+            @foreach (var tile in Question.Tiles ?? [])
+            {
+                var used = Placed.Count(p => p.id == tile.TileId);
+                <button type="button" class="ef-letter-tile" disabled="@(UsedCount(tile.TileId) >= TileCount(tile.TileId))"
+                        @onclick="() => PlaceAsync(tile.TileId)">
+                    @tile.Letter
+                </button>
+            }
+        </div>
+        <p class="ef-card__meta">Нажимайте буквы по порядку; клик по клетке возвращает букву.</p>
+    </div>
+}
+else if (Question.Type is "Ordering")
+{
+    <ol class="ef-ordering">
+        @for (var i = 0; i < Order.Count; i++)
+        {
+            var index = i;
+            var text = (Question.OrderingItems ?? []).FirstOrDefault(o => o.Id == Order[index])?.Text ?? "?";
+            <li class="ef-ordering-item">
+                <span>@text</span>
+                <span class="ef-ordering-controls">
+                    <button type="button" class="ef-button ef-button--sm" disabled="@(index == 0)"
+                            @onclick="() => MoveAsync(index, -1)" aria-label="Поднять «@text»">↑</button>
+                    <button type="button" class="ef-button ef-button--sm" disabled="@(index == Order.Count - 1)"
+                            @onclick="() => MoveAsync(index, 1)" aria-label="Опустить «@text»">↓</button>
+                </span>
+            </li>
+        }
+    </ol>
+}
+else if (Question.Type is "GapFill")
+{
+    <div class="ef-gaps">
+        @foreach (var blankId in Question.BlankIds ?? [])
+        {
+            <div class="ef-field">
+                <label for="gap-@blankId">Пропуск @blankId</label>
+                <input id="gap-@blankId" class="ef-input"
+                       value="@ValueOf(blankId)"
+                       @oninput="e => OnValueInputAsync(e, blankId)" autocomplete="off" />
+            </div>
+        }
+    </div>
+}
+else if (Question.Type is "Structured")
+{
+    <div class="ef-gaps">
+        @foreach (var field in Question.StructuredFields ?? [])
+        {
+            <div class="ef-field">
+                <label for="sf-@field.Id">@field.Text</label>
+                <input id="sf-@field.Id" class="ef-input"
+                       value="@ValueOf(field.Id)"
+                       @oninput="e => OnValueInputAsync(e, field.Id)" autocomplete="off" />
+            </div>
+        }
+    </div>
+}
+else
+{
+    <p class="ef-card__meta">Неизвестный тип задания. Обратитесь к преподавателю.</p>
+}
+
+@code {
+    [Parameter] public required StudentQuestionDto Question { get; set; }
+    [Parameter] public EventCallback OnChanged { get; set; }
+
+    private string? Selected { get; set; }
+    private readonly HashSet<string> SelectedMulti = [];
+    private string Text { get; set; } = string.Empty;
+    private string? SelectedLeft { get; set; }
+    private readonly Dictionary<string, string> Pairs = [];
+    private readonly List<(string id, char letter)> Placed = [];
+    private List<string> Order { get; set; } = [];
+    private readonly Dictionary<string, string> Values = [];
+
+    private int Slots => (Question.Tiles?.Count ?? 0);
+
+    protected override void OnParametersSet()
+    {
+        if (Order.Count == 0 && Question.OrderingItems is { Count: > 0 })
+            Order = Question.OrderingItems.Select(o => o.Id).ToList();
+    }
+
+    public object BuildAnswer() => Question.Type switch
+    {
+        "SingleChoice" => new { selectedOptionId = Selected },
+        "MultipleChoice" => new { selectedOptionIds = SelectedMulti.ToArray() },
+        "ShortText" or "LongText" => new { text = Text },
+        "Matching" => new { pairSelections = Pairs },
+        "LetterAssembly" => new { tileSequence = Placed.Select(p => p.id).ToArray() },
+        "Ordering" => new { order = Order.ToArray() },
+        "GapFill" => new { blankValues = Values },
+        "Structured" => new { fieldValues = Values },
+        _ => new { },
+    };
+
+    private async Task SelectAsync(string optionId) { Selected = optionId; await ChangedAsync(); }
+    private async Task ToggleAsync(string optionId, bool on)
+    {
+        if (on) SelectedMulti.Add(optionId); else SelectedMulti.Remove(optionId);
+        await ChangedAsync();
+    }
+    private void SelectLeft(string leftId) => SelectedLeft = SelectedLeft == leftId ? null : leftId;
+    private async Task AssignRight(string rightId)
+    {
+        if (SelectedLeft is { } left)
+        {
+            if (Pairs.TryGetValue(left, out var current) && current == rightId)
+                Pairs.Remove(left);
+            else
+                Pairs[left] = rightId;
+            SelectedLeft = null;
+            await ChangedAsync();
+        }
+    }
+    private async Task PlaceAsync(string tileId)
+    {
+        var letter = (Question.Tiles ?? []).First(t => t.TileId == tileId).Letter;
+        if (Placed.Count < Slots && UsedCount(tileId) < TileCount(tileId))
+        {
+            Placed.Add((tileId, letter));
+            await ChangedAsync();
+        }
+    }
+    private async Task RemoveAtAsync(int index)
+    {
+        if (index >= 0 && index < Placed.Count)
+        {
+            Placed.RemoveAt(index);
+            await ChangedAsync();
+        }
+    }
+    private int UsedCount(string tileId) => Placed.Count(p => p.id == tileId);
+    private int TileCount(string tileId) => (Question.Tiles ?? []).Count(t => t.TileId == tileId);
+
+    private string SlotLabel(int index) => index < Placed.Count
+        ? $"Позиция {index + 1}: {Placed[index].letter} — нажмите, чтобы убрать"
+        : $"Позиция {index + 1}: пусто";
+
+    private string SlotText(int index) => index < Placed.Count ? Placed[index].letter.ToString() : "";
+
+    private async Task MoveAsync(int index, int delta)
+    {
+        var target = index + delta;
+        if (target < 0 || target >= Order.Count) return;
+        (Order[index], Order[target]) = (Order[target], Order[index]);
+        await ChangedAsync();
+    }
+
+    private async Task SetAsync(string key, string value) { Values[key] = value; await ChangedAsync(); }
+
+    private async Task OnValueInputAsync(ChangeEventArgs e, string key)
+        => await SetAsync(key, e.Value?.ToString() ?? string.Empty);
+
+    private string ValueOf(string key) => Values.TryGetValue(key, out var value) ? value : string.Empty;
+
+    private Task ChangedAsync() => OnChanged.InvokeAsync();
+}

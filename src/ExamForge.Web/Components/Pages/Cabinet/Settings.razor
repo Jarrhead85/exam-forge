@@ -1,0 +1,443 @@
+﻿@page "/cabinet/settings"
+@layout Layout.TeacherLayout
+@attribute [Authorize]
+@* prerender: содержимое видно мгновенно; формы защищены submit-блокировщиком в App.razor *@
+@rendermode InteractiveServer
+@using ExamForge.Application.TeacherFlow
+@using ExamForge.Infrastructure.Identity
+@using ExamForge.Infrastructure.Services
+@using Microsoft.AspNetCore.Identity
+@inject UserManager<TeacherUser> UserManager
+@inject SignInManager<TeacherUser> SignInManager
+@inject AdminTeachersService AdminTeachers
+@inject SubjectsService Subjects
+@inject AuthenticationStateProvider AuthState
+
+<PageTitle>Настройки — Exam Forge</PageTitle>
+
+<h1>Настройки</h1>
+
+<section class="ef-card" aria-labelledby="subjects-title">
+    <h2 id="subjects-title" class="ef-card__title">Предметы</h2>
+    <p class="ef-card__meta">Предметы общие для портала: доступны всем преподавателям в банке заданий, словаре и материалах. Удаляется только неиспользуемый предмет.</p>
+
+    <EditForm Model="SubjectForm" OnValidSubmit="CreateSubjectAsync" class="ef-form">
+        <DataAnnotationsValidator />
+        <div class="ef-form ef-form--inline">
+        <div class="ef-field">
+            <label for="subj-name">Название</label>
+            <InputText id="subj-name" @bind-Value="SubjectForm.Name" autocomplete="off" placeholder="История" />
+            <ValidationMessage For="() => SubjectForm.Name" />
+        </div>
+            <div class="ef-field">
+                <label for="subj-code">Код (необязательно)</label>
+                <InputText id="subj-code" @bind-Value="SubjectForm.Code" autocomplete="off" placeholder="hist" />
+            </div>
+            <button class="ef-button ef-button--secondary" type="submit" disabled="@_busy">Добавить предмет</button>
+        </div>
+    </EditForm>
+
+    @if (_subjectError is not null)
+    {
+        <p class="ef-form-error" role="alert">@_subjectError</p>
+    }
+
+    @if (_subjects.Count > 0)
+    {
+        <table class="ef-table">
+            <caption>Предметы портала</caption>
+            <thead><tr><th scope="col">Название</th><th scope="col">Код</th><th scope="col"></th></tr></thead>
+            <tbody>
+                @foreach (var subject in _subjects)
+                {
+                    @if (_editSubjectId == subject.Id)
+                    {
+                        <tr>
+                            <td><InputText @bind-Value="_editSubjectName" aria-label="Название предмета" autocomplete="off" /></td>
+                            <td><InputText @bind-Value="_editSubjectCode" aria-label="Код предмета" autocomplete="off" /></td>
+                            <td>
+                                <div class="ef-actions">
+                                    <button class="ef-button ef-button--sm ef-button--primary" @onclick="() => SaveSubjectAsync(subject.Id)">Сохранить</button>
+                                    <button class="ef-button ef-button--sm ef-button--quiet" @onclick="CancelSubjectEdit">Отмена</button>
+                                </div>
+                            </td>
+                        </tr>
+                    }
+                    else
+                    {
+                        <tr>
+                            <td>@subject.Name</td>
+                            <td>@(subject.Code ?? "—")</td>
+                            <td>
+                                <div class="ef-actions">
+                                    <button class="ef-button ef-button--sm ef-button--quiet" @onclick="() => StartSubjectEdit(subject)">Переименовать</button>
+                                    @if (_confirmDeleteSubjectId == subject.Id)
+                                    {
+                                        <button class="ef-button ef-button--sm ef-button--danger" @onclick="() => DeleteSubjectAsync(subject.Id)">Точно удалить?</button>
+                                        <button class="ef-button ef-button--sm ef-button--quiet" @onclick="() => _confirmDeleteSubjectId = null">Отмена</button>
+                                    }
+                                    else
+                                    {
+                                        <button class="ef-button ef-button--sm ef-button--danger" @onclick="() => _confirmDeleteSubjectId = subject.Id">Удалить</button>
+                                    }
+                                </div>
+                            </td>
+                        </tr>
+                    }
+                }
+            </tbody>
+        </table>
+    }
+</section>
+
+<section class="ef-card" aria-labelledby="password-title">
+    <h2 id="password-title" class="ef-card__title">Смена пароля</h2>
+    <EditForm Model="PasswordForm" OnValidSubmit="ChangePasswordAsync" class="ef-form">
+        <DataAnnotationsValidator />
+        <div class="ef-field">
+            <label for="s-current">Текущий пароль</label>
+            <InputText id="s-current" type="password" @bind-Value="PasswordForm.CurrentPassword" autocomplete="current-password" />
+        </div>
+        <div class="ef-field">
+            <label for="s-new">Новый пароль (минимум 10 символов, цифры и регистр)</label>
+            <InputText id="s-new" type="password" @bind-Value="PasswordForm.NewPassword" autocomplete="new-password" />
+            <ValidationMessage For="() => PasswordForm.NewPassword" />
+        </div>
+        @if (_passwordError is not null)
+        {
+            <p class="ef-form-error" role="alert">@_passwordError</p>
+        }
+        @if (_passwordOk)
+        {
+            <div class="ef-callout ef-callout--info"><p>Пароль изменён.</p></div>
+        }
+        <button class="ef-button ef-button--primary" type="submit" disabled="@_busy">Изменить пароль</button>
+    </EditForm>
+</section>
+
+@if (_isAdmin)
+{
+    <section class="ef-card" aria-labelledby="teachers-title">
+        <h2 id="teachers-title" class="ef-card__title">Преподаватели (администратор)</h2>
+        <p class="ef-card__meta">Учётные записи персонала. Деактивация запрещает вход, но сохраняет авторство и историю; удаление учёток не предусмотрено.</p>
+
+        @if (_oneTimeInfo is not null)
+        {
+            <div class="ef-callout ef-callout--warning" role="alert">
+                <p>@_oneTimeInfo</p>
+            </div>
+        }
+
+        <EditForm Model="TeacherForm" OnValidSubmit="CreateTeacherAsync" class="ef-form">
+            <DataAnnotationsValidator />
+            <div class="ef-form ef-form--inline">
+                <div class="ef-field">
+                    <label for="t-new-login">Логин</label>
+                    <InputText id="t-new-login" @bind-Value="TeacherForm.Login" autocomplete="off" />
+                    <ValidationMessage For="() => TeacherForm.Login" />
+                </div>
+                <div class="ef-field">
+                    <label for="t-new-name">ФИО</label>
+                    <InputText id="t-new-name" @bind-Value="TeacherForm.DisplayName" autocomplete="off" />
+                    <ValidationMessage For="() => TeacherForm.DisplayName" />
+                </div>
+                <div class="ef-field">
+                    <label for="t-new-password">Пароль</label>
+                    <InputText id="t-new-password" @bind-Value="TeacherForm.Password" type="password" autocomplete="new-password" />
+                    <ValidationMessage For="() => TeacherForm.Password" />
+                </div>
+                <button class="ef-button ef-button--secondary" type="submit" disabled="@_busy">Создать</button>
+            </div>
+        </EditForm>
+
+        @if (_teachers.Count > 0)
+        {
+            <table class="ef-table">
+                <caption>Учётные записи персонала</caption>
+                <thead><tr><th scope="col">Логин</th><th scope="col">ФИО</th><th scope="col">Статус</th><th scope="col"></th></tr></thead>
+                <tbody>
+                    @foreach (var teacher in _teachers)
+                    {
+                        @if (_editTeacherId == teacher.Id)
+                        {
+                            <tr>
+                                <td>@teacher.Login</td>
+                                <td><InputText @bind-Value="_editTeacherName" aria-label="ФИО преподавателя" autocomplete="off" /></td>
+                                <td>@(teacher.IsActive ? "активен" : "деактивирован")</td>
+                                <td>
+                                    <div class="ef-actions">
+                                        <button class="ef-button ef-button--sm ef-button--primary" @onclick="() => SaveTeacherNameAsync(teacher.Id)">Сохранить</button>
+                                        <button class="ef-button ef-button--sm ef-button--quiet" @onclick="CancelTeacherEdit">Отмена</button>
+                                    </div>
+                                </td>
+                            </tr>
+                        }
+                        else
+                        {
+                            <tr>
+                                <td>@teacher.Login</td>
+                                <td>@teacher.DisplayName</td>
+                                <td>@(teacher.IsActive ? "активен" : "деактивирован")</td>
+                                <td>
+                                    <div class="ef-actions">
+                                        <button class="ef-button ef-button--sm ef-button--quiet" @onclick="() => StartTeacherEdit(teacher)">Переименовать</button>
+                                        @if (_resetTeacherId == teacher.Id)
+                                        {
+                                            <InputText @bind-Value="_resetTeacherPassword" type="password" aria-label="Новый пароль" placeholder="Новый пароль" autocomplete="new-password" />
+                                            <button class="ef-button ef-button--sm ef-button--secondary" @onclick="() => ResetTeacherPasswordAsync(teacher.Id)" disabled="@(_resetTeacherPassword.Length < 10)">Сменить</button>
+                                            <button class="ef-button ef-button--sm ef-button--quiet" @onclick="() => _resetTeacherId = null">Отмена</button>
+                                        }
+                                        else
+                                        {
+                                            <button class="ef-button ef-button--sm ef-button--quiet" @onclick="() => StartTeacherReset(teacher.Id)">Сбросить пароль</button>
+                                        }
+                                    @if (teacher.IsActive)
+                                    {
+                                        @if (_confirmDeactivateId == teacher.Id)
+                                        {
+                                            <button class="ef-button ef-button--sm ef-button--danger" @onclick="() => SetTeacherActiveAsync(teacher.Id, false)">Точно деактивировать?</button>
+                                            <button class="ef-button ef-button--sm ef-button--quiet" @onclick="() => _confirmDeactivateId = null">Отмена</button>
+                                        }
+                                        else
+                                        {
+                                            <button class="ef-button ef-button--sm ef-button--danger" @onclick="() => _confirmDeactivateId = teacher.Id">Деактивировать</button>
+                                        }
+                                    }
+                                    else
+                                    {
+                                        <button class="ef-button ef-button--sm ef-button--secondary" @onclick="() => SetTeacherActiveAsync(teacher.Id, true)">Включить</button>
+                                    }
+                                    </div>
+                                </td>
+                            </tr>
+                        }
+                    }
+                </tbody>
+            </table>
+        }
+    </section>
+}
+
+@code {
+    private sealed class PasswordFormModel
+    {
+        [System.ComponentModel.DataAnnotations.Required(ErrorMessage = "Введите текущий пароль.")]
+        public string CurrentPassword { get; set; } = string.Empty;
+        [System.ComponentModel.DataAnnotations.Required(ErrorMessage = "Введите новый пароль.")]
+        public string NewPassword { get; set; } = string.Empty;
+    }
+
+    private sealed class TeacherFormModel
+    {
+        [System.ComponentModel.DataAnnotations.Required(ErrorMessage = "Введите логин.")]
+        public string Login { get; set; } = string.Empty;
+        [System.ComponentModel.DataAnnotations.Required(ErrorMessage = "Введите ФИО.")]
+        public string DisplayName { get; set; } = string.Empty;
+        [System.ComponentModel.DataAnnotations.Required(ErrorMessage = "Введите пароль.")]
+        public string Password { get; set; } = string.Empty;
+    }
+
+    private sealed class SubjectFormModel
+    {
+        [System.ComponentModel.DataAnnotations.Required(ErrorMessage = "Введите название предмета.")]
+        public string Name { get; set; } = string.Empty;
+        public string? Code { get; set; }
+    }
+
+    private PasswordFormModel PasswordForm { get; set; } = new();
+    private TeacherFormModel TeacherForm { get; set; } = new();
+    private SubjectFormModel SubjectForm { get; set; } = new();
+    private bool _isAdmin;
+    private bool _passwordOk;
+    private string? _passwordError;
+    private string? _oneTimeInfo;
+    private string? _subjectError;
+    private readonly List<SubjectDto> _subjects = [];
+    private readonly List<TeacherListItemDto> _teachers = [];
+    private bool _busy;
+
+    private Guid? _editSubjectId;
+    private string _editSubjectName = string.Empty;
+    private string? _editSubjectCode;
+    private Guid? _confirmDeleteSubjectId;
+
+    private Guid? _editTeacherId;
+    private string _editTeacherName = string.Empty;
+    private Guid? _resetTeacherId;
+    private string _resetTeacherPassword = string.Empty;
+    private Guid? _confirmDeactivateId;
+
+    protected override async Task OnInitializedAsync()
+    {
+        var actor = await ActorAsync();
+        _isAdmin = actor.IsAdministrator;
+        if (_isAdmin)
+            _teachers.AddRange(await AdminTeachers.ListTeachersAsync(actor, CancellationToken.None));
+        _subjects.AddRange(await Subjects.ListAsync(CancellationToken.None));
+    }
+
+    private async Task ReloadSubjectsAsync()
+    {
+        _subjects.Clear();
+        _subjects.AddRange(await Subjects.ListAsync(CancellationToken.None));
+    }
+
+    private async Task ReloadTeachersAsync()
+    {
+        if (!_isAdmin) return;
+        _teachers.Clear();
+        _teachers.AddRange(await AdminTeachers.ListTeachersAsync(await ActorAsync(), CancellationToken.None));
+    }
+
+    private async Task CreateSubjectAsync()
+    {
+        _busy = true;
+        _subjectError = null;
+        try
+        {
+            await Subjects.CreateAsync(await ActorAsync(), SubjectForm.Name.Trim(), SubjectForm.Code, CancellationToken.None);
+            SubjectForm = new SubjectFormModel();
+            await ReloadSubjectsAsync();
+        }
+        catch (Exception ex) { _subjectError = ex.Message; }
+        finally { _busy = false; }
+    }
+
+    private void StartSubjectEdit(SubjectDto subject)
+    {
+        _editSubjectId = subject.Id;
+        _editSubjectName = subject.Name;
+        _editSubjectCode = subject.Code;
+        _confirmDeleteSubjectId = null;
+        _subjectError = null;
+    }
+
+    private void CancelSubjectEdit() => _editSubjectId = null;
+
+    private async Task SaveSubjectAsync(Guid subjectId)
+    {
+        _subjectError = null;
+        try
+        {
+            await Subjects.RenameAsync(await ActorAsync(), subjectId, _editSubjectName.Trim(), _editSubjectCode, CancellationToken.None);
+            _editSubjectId = null;
+            await ReloadSubjectsAsync();
+        }
+        catch (Exception ex) { _subjectError = ex.Message; }
+    }
+
+    private async Task DeleteSubjectAsync(Guid subjectId)
+    {
+        _subjectError = null;
+        try
+        {
+            await Subjects.DeleteAsync(await ActorAsync(), subjectId, CancellationToken.None);
+            _confirmDeleteSubjectId = null;
+            await ReloadSubjectsAsync();
+        }
+        catch (Exception ex) { _subjectError = ex.Message; _confirmDeleteSubjectId = null; }
+    }
+
+    private async Task ChangePasswordAsync()
+    {
+        _busy = true;
+        _passwordError = null;
+        _passwordOk = false;
+        try
+        {
+            var user = await UserManager.GetUserAsync((await AuthState.GetAuthenticationStateAsync()).User)
+                ?? throw new InvalidOperationException("Нет пользователя.");
+            var result = await UserManager.ChangePasswordAsync(user, PasswordForm.CurrentPassword, PasswordForm.NewPassword);
+            if (!result.Succeeded)
+            {
+                _passwordError = string.Join("; ", result.Errors.Select(e => e.Description));
+                return;
+            }
+            _passwordOk = true;
+            PasswordForm = new PasswordFormModel();
+        }
+        catch (Exception ex) { _passwordError = ex.Message; }
+        finally { _busy = false; }
+    }
+
+    private async Task CreateTeacherAsync()
+    {
+        _busy = true;
+        _oneTimeInfo = null;
+        try
+        {
+            await AdminTeachers.CreateTeacherAsync(
+                await ActorAsync(), TeacherForm.Login, TeacherForm.Password, TeacherForm.DisplayName, CancellationToken.None);
+            _oneTimeInfo = $"Преподаватель {TeacherForm.Login} создан. Передайте пароль лично; хранение в открытом виде не предусмотрено.";
+            TeacherForm = new TeacherFormModel();
+            await ReloadTeachersAsync();
+        }
+        catch (Exception ex) { _oneTimeInfo = ex.Message; }
+        finally { _busy = false; }
+    }
+
+    private void StartTeacherEdit(TeacherListItemDto teacher)
+    {
+        _editTeacherId = teacher.Id;
+        _editTeacherName = teacher.DisplayName;
+        _resetTeacherId = null;
+        _confirmDeactivateId = null;
+        _oneTimeInfo = null;
+    }
+
+    private void CancelTeacherEdit() => _editTeacherId = null;
+
+    private async Task SaveTeacherNameAsync(Guid teacherId)
+    {
+        _oneTimeInfo = null;
+        try
+        {
+            await AdminTeachers.RenameTeacherAsync(await ActorAsync(), teacherId, _editTeacherName, CancellationToken.None);
+            _editTeacherId = null;
+            await ReloadTeachersAsync();
+        }
+        catch (Exception ex) { _oneTimeInfo = ex.Message; }
+    }
+
+    private void StartTeacherReset(Guid teacherId)
+    {
+        _resetTeacherId = teacherId;
+        _resetTeacherPassword = string.Empty;
+        _editTeacherId = null;
+        _confirmDeactivateId = null;
+        _oneTimeInfo = null;
+    }
+
+    private async Task ResetTeacherPasswordAsync(Guid teacherId)
+    {
+        _oneTimeInfo = null;
+        try
+        {
+            await AdminTeachers.ResetTeacherPasswordAsync(await ActorAsync(), teacherId, _resetTeacherPassword, CancellationToken.None);
+            _resetTeacherId = null;
+            _resetTeacherPassword = string.Empty;
+            _oneTimeInfo = "Пароль преподавателя изменён. Передайте новый пароль лично.";
+        }
+        catch (Exception ex) { _oneTimeInfo = ex.Message; }
+    }
+
+    private async Task SetTeacherActiveAsync(Guid teacherId, bool active)
+    {
+        _oneTimeInfo = null;
+        try
+        {
+            await AdminTeachers.SetTeacherActiveAsync(await ActorAsync(), teacherId, active, CancellationToken.None);
+            _confirmDeactivateId = null;
+            await ReloadTeachersAsync();
+        }
+        catch (Exception ex) { _oneTimeInfo = ex.Message; _confirmDeactivateId = null; }
+    }
+
+    private async Task<TeacherActor> ActorAsync()
+    {
+        var state = await AuthState.GetAuthenticationStateAsync();
+        var user = await UserManager.GetUserAsync(state.User)
+            ?? throw new InvalidOperationException("Нет пользователя.");
+        return new TeacherActor(user.Id, await UserManager.IsInRoleAsync(user, AppRoles.Administrator));
+    }
+}

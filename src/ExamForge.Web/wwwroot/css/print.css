@@ -1,0 +1,156 @@
+/* Печать A4 (ТЗ §13, UI_KIT §8): бумага белая, чернила чёрные, без темы/навигации. */
+
+.print-toolbar {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    max-width: 820px;
+    margin: 16px auto;
+    font-family: var(--ef-font-body);
+}
+
+.print-toolbar__title { font-size: 14px; color: var(--ef-muted); margin-right: auto; }
+
+.print-sheet {
+    width: 210mm;
+    min-height: 297mm;
+    margin: 0 auto;
+    padding: 18mm;
+    background: #ffffff;
+    color: #000000;
+    font-family: var(--ef-font-body);
+    font-size: 12pt;
+    line-height: 1.5;
+}
+
+.print-sheet h1 {
+    font-family: var(--ef-font-display);
+    font-size: 18pt;
+    margin: 0 0 4pt;
+}
+
+.print-sheet__codes {
+    font-family: var(--ef-font-mono);
+    font-size: 9.5pt;
+    border: 1pt solid #000;
+    padding: 4pt 8pt;
+    margin: 8pt 0 12pt;
+}
+
+.print-sheet__fields {
+    display: grid;
+    gap: 10pt;
+    margin: 12pt 0 16pt;
+    border: 1pt solid #000;
+    padding: 10pt;
+}
+
+.print-sheet__field {
+    display: flex;
+    gap: 8pt;
+    align-items: baseline;
+}
+
+.print-sheet__field-line { flex: 1; border-bottom: 0.75pt solid #000; min-height: 16pt; }
+
+.print-q {
+    break-inside: avoid;
+    page-break-inside: avoid;
+    margin-bottom: 14pt;
+    padding-top: 6pt;
+    border-top: 0.5pt solid #000;
+}
+
+.print-q:first-of-type { border-top: none; }
+
+.print-q__head {
+    display: flex;
+    gap: 6pt;
+    align-items: baseline;
+}
+
+.print-q__number { font-weight: 700; }
+
+.print-q__prompt { font-weight: 600; }
+
+.print-q__points { margin-left: auto; font-size: 10.5pt; white-space: nowrap; }
+
+.print-options { list-style: none; margin: 6pt 0 0; padding: 0; display: grid; gap: 4pt; }
+
+.print-option { display: flex; gap: 6pt; }
+
+.print-option__marker { font-weight: 700; min-width: 18pt; }
+
+.print-answer-line {
+    border-bottom: 0.75pt solid #000;
+    height: 22pt;
+    margin: 6pt 0 2pt;
+}
+
+.print-match {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12pt;
+    margin-top: 6pt;
+}
+
+.print-match__col { display: grid; gap: 4pt; }
+
+.print-match__pairline { border-bottom: 0.75pt solid #000; min-width: 40pt; display: inline-block; }
+
+.print-slots { display: flex; flex-wrap: wrap; gap: 4pt; margin-top: 6pt; }
+
+.print-slot {
+    width: 26pt;
+    height: 26pt;
+    border: 1pt solid #000;
+    border-bottom: 2pt solid #000;
+    display: inline-block;
+}
+
+.print-letters { margin-top: 6pt; letter-spacing: 4pt; font-family: var(--ef-font-display); font-size: 14pt; }
+
+.print-order-line { margin-top: 10pt; display: flex; gap: 6pt; align-items: flex-end; }
+
+.print-order-cell {
+    width: 30pt;
+    height: 20pt;
+    border-bottom: 1pt solid #000;
+    text-align: center;
+    font-size: 10.5pt;
+}
+
+.print-key {
+    border: 1.5pt solid #000;
+    padding: 6pt 8pt;
+    margin-top: 6pt;
+    background: #f0f0f0;
+    font-size: 11pt;
+}
+
+.print-key__title { font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
+
+.print-footer {
+    margin-top: 16pt;
+    border-top: 0.5pt solid #000;
+    padding-top: 4pt;
+    font-size: 9.5pt;
+    display: flex;
+    justify-content: space-between;
+}
+
+@media print {
+    @page { size: A4; margin: 18mm; }
+
+    .no-print, .print-toolbar { display: none !important; }
+
+    .print-sheet {
+        width: auto;
+        min-height: auto;
+        margin: 0;
+        padding: 0;
+        box-shadow: none;
+    }
+
+    body { background: #ffffff !important; }
+}

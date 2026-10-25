@@ -1,0 +1,294 @@
+﻿@page "/cabinet/materials"
+@layout Layout.TeacherLayout
+@attribute [Authorize]
+@rendermode InteractiveServer
+@using ExamForge.Application.Files
+@using ExamForge.Application.TeacherFlow
+@using ExamForge.Infrastructure.Files
+@using ExamForge.Infrastructure.Identity
+@using ExamForge.Infrastructure.Persistence
+@using ExamForge.Infrastructure.Services
+@using Microsoft.AspNetCore.Identity
+@using Microsoft.EntityFrameworkCore
+@inject ExamForgeDbContext Db
+@inject MaterialsService MaterialsService
+@inject UserManager<TeacherUser> UserManager
+@inject AuthenticationStateProvider AuthState
+
+<PageTitle>Материалы — Exam Forge</PageTitle>
+
+<h1>Материалы</h1>
+<p class="ef-card__meta">
+    Лекционные PDF с доступом по группам и студентам. Скачивание — только авторизованным;
+    публичных ссылок нет. Лимит PDF — 25 MiB.
+</p>
+
+<section class="ef-card" aria-labelledby="upload-title">
+    <h2 id="upload-title" class="ef-card__title">Загрузить лекцию (PDF)</h2>
+    @if (_subjects.Count == 0)
+    {
+        <div class="ef-callout ef-callout--info"><p>Сначала создайте предмет (справочник предметов появится в разделе «Словарь»/«Настройки»).</p></div>
+    }
+    else
+    {
+        <EditForm Model="Form" OnValidSubmit="UploadAsync" class="ef-form">
+            <DataAnnotationsValidator />
+            <div class="ef-field">
+                <label for="m-title">Название</label>
+                <InputText id="m-title" @bind-Value="Form.Title" autocomplete="off" />
+                <ValidationMessage For="() => Form.Title" />
+            </div>
+            <div class="ef-field">
+                <label for="m-subject">Предмет</label>
+                <select id="m-subject" @bind="Form.SubjectId">
+                    @foreach (var subject in _subjects)
+                    {
+                        <option value="@subject.Id">@subject.Name</option>
+                    }
+                </select>
+            </div>
+            <div class="ef-field">
+                <label for="m-desc">Описание</label>
+                <InputText id="m-desc" @bind-Value="Form.Description" autocomplete="off" />
+            </div>
+            <div class="ef-field">
+                <label for="m-source">Источник/права</label>
+                <InputText id="m-source" @bind-Value="Form.SourceNote" autocomplete="off" />
+            </div>
+            <div class="ef-field">
+                <label for="m-file">Файл PDF</label>
+                <InputFile id="m-file" OnChange="FileSelectedAsync" accept=".pdf,application/pdf" />
+            </div>
+            @if (_error is not null)
+            {
+                <p class="ef-form-error" role="alert">@_error</p>
+            }
+            @if (_uploaded is not null)
+            {
+                <div class="ef-callout ef-callout--info"><p>Загружено: @_uploaded (черновик). Опубликуйте и выдайте доступ ниже.</p></div>
+            }
+            <button class="ef-button ef-button--primary" type="submit" disabled="@(_busy || _selectedFile is null)">
+                Загрузить
+            </button>
+        </EditForm>
+    }
+</section>
+
+<h2>Мои материалы</h2>
+@if (_materials.Count == 0)
+{
+    <div class="ef-callout ef-callout--info"><p>Материалов пока нет.</p></div>
+}
+@foreach (var material in _materials)
+{
+    <section class="ef-card" aria-labelledby="mat-@material.MaterialId">
+        <p class="ef-card__eyebrow">@StatusText(material.Status) · @FileSizeText(material.FileSizeBytes) · доступов: @material.GrantCount</p>
+        @if (_editMaterialId == material.MaterialId)
+        {
+            <div class="ef-form ef-form--inline">
+                <div class="ef-field">
+                    <label for="@($"mat-edit-title-{material.MaterialId}")">Название</label>
+                    <InputText id="@($"mat-edit-title-{material.MaterialId}")" @bind-Value="_editMaterialTitle" autocomplete="off" />
+                </div>
+                <div class="ef-field">
+                    <label for="@($"mat-edit-desc-{material.MaterialId}")">Описание</label>
+                    <InputText id="@($"mat-edit-desc-{material.MaterialId}")" @bind-Value="_editMaterialDescription" autocomplete="off" />
+                </div>
+                <button class="ef-button ef-button--sm ef-button--primary" @onclick="() => RenameMaterialAsync(material.MaterialId)">Сохранить</button>
+                <button class="ef-button ef-button--sm ef-button--quiet" @onclick="() => _editMaterialId = null">Отмена</button>
+            </div>
+        }
+        else
+        {
+            <h3 id="mat-@material.MaterialId" class="ef-card__title">@material.Title</h3>
+            if (!string.IsNullOrEmpty(material.Description))
+            {
+                <p class="ef-card__meta">@material.Description</p>
+            }
+        }
+        <div class="ef-actions">
+            <button class="ef-button ef-button--sm ef-button--quiet" @onclick="() => StartMaterialEdit(material.MaterialId, material.Title, material.Description)">Переименовать</button>
+            @if (material.Status == "Draft")
+            {
+                <button class="ef-button ef-button--sm ef-button--primary" @onclick="() => PublishAsync(material.MaterialId)">Опубликовать</button>
+            }
+            @if (material.Status == "Published")
+            {
+                @if (_confirmArchiveId == material.MaterialId)
+                {
+                    <button class="ef-button ef-button--sm ef-button--danger" @onclick="() => ArchiveAsync(material.MaterialId)">Точно в архив?</button>
+                    <button class="ef-button ef-button--sm ef-button--quiet" @onclick="() => _confirmArchiveId = null">Отмена</button>
+                }
+                else
+                {
+                    <button class="ef-button ef-button--sm ef-button--danger" @onclick="() => _confirmArchiveId = material.MaterialId">В архив</button>
+                }
+            }
+            @if (material.Status != "Archived" && _students.Count > 0)
+            {
+                <div class="ef-field">
+                    <label for="@($"mat-grant-{material.MaterialId}")">Выдать доступ студенту</label>
+                    <select id="@($"mat-grant-{material.MaterialId}")" @bind="_grantStudentId">
+                        @foreach (var student in _students)
+                        {
+                            <option value="@student.Id">@student.Name</option>
+                        }
+                    </select>
+                </div>
+                <button class="ef-button ef-button--sm ef-button--secondary" @onclick="() => GrantAsync(material.MaterialId)">
+                    Выдать
+                </button>
+            }
+            <a class="ef-button ef-button--sm ef-button--quiet"
+               href="@($"/api/materials/{material.MaterialId}/file")" target="_blank">Скачать</a>
+        </div>
+    </section>
+}
+
+@code {
+    private sealed class UploadForm
+    {
+        [System.ComponentModel.DataAnnotations.Required(ErrorMessage = "Введите название.")]
+        public string Title { get; set; } = string.Empty;
+        public Guid? SubjectId { get; set; }
+        public string? Description { get; set; }
+        public string? SourceNote { get; set; }
+    }
+
+    private readonly List<(Guid Id, string Name)> _subjects = [];
+    private readonly List<(Guid Id, string Name)> _students = [];
+    private readonly List<MaterialDto> _materials = [];
+    private UploadForm Form { get; set; } = new();
+    private IBrowserFile? _selectedFile;
+    private string? _error;
+    private string? _uploaded;
+    private Guid? _grantStudentId;
+    private bool _busy;
+    private Guid? _editMaterialId;
+    private string _editMaterialTitle = string.Empty;
+    private string? _editMaterialDescription;
+    private Guid? _confirmArchiveId;
+
+    private void StartMaterialEdit(Guid materialId, string title, string? description)
+    {
+        _editMaterialId = materialId;
+        _editMaterialTitle = title;
+        _editMaterialDescription = description;
+        _error = null;
+    }
+
+    private async Task RenameMaterialAsync(Guid materialId)
+    {
+        _error = null;
+        try
+        {
+            await MaterialsService.RenameAsync(await ActorAsync(), materialId, _editMaterialTitle.Trim(), _editMaterialDescription, CancellationToken.None);
+            _editMaterialId = null;
+            await ReloadAsync();
+        }
+        catch (Exception ex) { _error = ex.Message; }
+    }
+
+    protected override async Task OnInitializedAsync() => await ReloadAsync();
+
+    private async Task ReloadAsync()
+    {
+        _error = null;
+        try
+        {
+            var actor = await ActorAsync();
+            _subjects.Clear();
+            _subjects.AddRange((await Db.Subjects.AsNoTracking().OrderBy(s => s.Name).ToListAsync())
+                .Select(s => (s.Id, s.Name)));
+            Form.SubjectId ??= _subjects.FirstOrDefault().Id;
+
+            _students.Clear();
+            _students.AddRange((await Db.StudentProfiles.AsNoTracking()
+                    .Where(p => p.CreatedByTeacherId == actor.TeacherId)
+                    .OrderBy(p => p.LastName).ThenBy(p => p.FirstName)
+                    .Select(p => new { p.Id, p.LastName, p.FirstName, p.MiddleName }).ToListAsync())
+                .Select(p => (p.Id, p.MiddleName is null ? $"{p.LastName} {p.FirstName}" : $"{p.LastName} {p.FirstName} {p.MiddleName}")));
+            _grantStudentId ??= _students.FirstOrDefault().Id;
+
+            _materials.Clear();
+            _materials.AddRange(await MaterialsService.ListForTeacherAsync(actor, CancellationToken.None));
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+    }
+
+    private void FileSelectedAsync(InputFileChangeEventArgs e)
+        => _selectedFile = e.File;
+
+    private async Task UploadAsync()
+    {
+        _busy = true;
+        _error = null;
+        _uploaded = null;
+        try
+        {
+            if (_selectedFile is null || Form.SubjectId is not { } subjectId)
+                return;
+            await using var stream = _selectedFile.OpenReadStream(30 * 1024 * 1024);
+            var material = await MaterialsService.UploadPdfAsync(
+                await ActorAsync(), stream, _selectedFile.Name, _selectedFile.ContentType,
+                subjectId, null, Form.Title, Form.Description, 0, Form.SourceNote, CancellationToken.None);
+            _uploaded = material.Title;
+            Form = new UploadForm { SubjectId = subjectId };
+            _selectedFile = null;
+            await ReloadAsync();
+        }
+        catch (FileStorageException ex)
+        {
+            _error = ex.Message;
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally { _busy = false; }
+    }
+
+    private async Task PublishAsync(Guid materialId)
+    {
+        await MaterialsService.PublishAsync(await ActorAsync(), materialId, CancellationToken.None);
+        await ReloadAsync();
+    }
+
+    private async Task ArchiveAsync(Guid materialId)
+    {
+        await MaterialsService.ArchiveAsync(await ActorAsync(), materialId, CancellationToken.None);
+        _confirmArchiveId = null;
+        await ReloadAsync();
+    }
+
+    private async Task GrantAsync(Guid materialId)
+    {
+        if (_grantStudentId is { } studentId)
+        {
+            await MaterialsService.GrantAsync(await ActorAsync(), materialId, null, studentId, CancellationToken.None);
+            await ReloadAsync();
+        }
+    }
+
+    private async Task<TeacherActor> ActorAsync()
+    {
+        var state = await AuthState.GetAuthenticationStateAsync();
+        var user = await UserManager.GetUserAsync(state.User)
+            ?? throw new InvalidOperationException("Нет пользователя.");
+        return new TeacherActor(user.Id, await UserManager.IsInRoleAsync(user, AppRoles.Administrator));
+    }
+
+    private static string StatusText(string status) => status switch
+    {
+        "Draft" => "черновик",
+        "Published" => "опубликован",
+        "Archived" => "в архиве",
+        _ => status,
+    };
+
+    private static string FileSizeText(long bytes)
+        => bytes >= 1024 * 1024 ? $"{bytes / (1024 * 1024)} МиБ" : $"{bytes / 1024} КиБ";
+}

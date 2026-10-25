@@ -1,0 +1,26 @@
+@inherits LayoutComponentBase
+
+<div class="ef-portal">
+    <header class="ef-portal-header">
+        <a class="ef-brand" href="/">
+            <span class="ef-brand-mark" aria-hidden="true">EF</span>
+            <span class="ef-brand-name">Exam&nbsp;Forge</span>
+        </a>
+        <nav class="ef-portal-nav" aria-label="Основная навигация">
+            <a href="/account/login">Вход преподавателя</a>
+        </nav>
+        <button type="button" class="ef-theme-toggle" data-ef-theme-toggle>Тема</button>
+    </header>
+    <main class="ef-portal-main" id="main">
+        @Body
+    </main>
+    <footer class="ef-portal-footer">
+        <p>Exam Forge — учебный портал для проведения тестов и контрольных.</p>
+    </footer>
+</div>
+
+<div id="blazor-error-ui" class="ef-error-ui" data-nosnippet>
+    <p>Произошла непредвиденная ошибка. Сохранённые на сервере ответы не потеряны.</p>
+    <a href="" class="reload">Перезагрузить</a>
+    <span class="dismiss" aria-hidden="true">🗙</span>
+</div>

@@ -1,0 +1,89 @@
+﻿@page "/cabinet/results"
+@layout Layout.TeacherLayout
+@attribute [Authorize]
+@* prerender: статистика видна сразу из SSR; форм нет. *@
+@rendermode InteractiveServer
+@using ExamForge.Application.TeacherFlow
+@using ExamForge.Infrastructure.Identity
+@using ExamForge.Infrastructure.Services
+@using Microsoft.AspNetCore.Identity
+@inject ResultsService ResultsService
+@inject TeacherAssignmentsService AssignmentsService
+@inject UserManager<TeacherUser> UserManager
+@inject AuthenticationStateProvider AuthState
+
+<PageTitle>Результаты — Exam Forge</PageTitle>
+
+<h1>Результаты</h1>
+<p class="ef-card__meta">
+    Статистика по назначениям с явными знаменателями. Описательная статистика — не доказательство знания темы.
+    Непроверенные работы показаны отдельно, не скрыты.
+</p>
+
+<div class="ef-form">
+    <div class="ef-field">
+        <label for="res-assignment">Назначение</label>
+        <select id="res-assignment" @bind="_selectedAssignmentId" @bind:after="LoadStatsAsync">
+            <option value="">— выберите —</option>
+            @foreach (var a in _assignments)
+            {
+                <option value="@a.AssignmentId">@a.TestTitle</option>
+            }
+        </select>
+    </div>
+</div>
+
+@if (_stats is not null)
+{
+    <section class="ef-card" aria-labelledby="stats-title">
+        <h2 id="stats-title" class="ef-card__title">Сводка</h2>
+        <table class="ef-table">
+            <caption>Знаменатели указаны явно</caption>
+            <thead>
+                <tr><th scope="col">Показатель</th><th scope="col">Значение</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>Приглашено студентов</td><td>@_stats.StudentsInvited</td></tr>
+                <tr><td>Попыток всего (онлайн)</td><td>@_stats.AttemptsTotal</td></tr>
+                <tr><td>Финализировано</td><td>@_stats.AttemptsFinalized</td></tr>
+                <tr><td>Ждут проверки</td><td>@_stats.AttemptsPending</td></tr>
+                <tr><td>Оценено с процентом</td><td>@_stats.GradedCount</td></tr>
+                <tr><td>Средний процент (по @_stats.GradedCount оценённым)</td><td>@_stats.AveragePercent%</td></tr>
+                <tr><td>Бумажных работ</td><td>@_stats.PaperWorks</td></tr>
+            </tbody>
+        </table>
+        <p>
+            <a class="ef-button ef-button--secondary" href="@($"api/assignments/{_selectedAssignmentId}/gradebook.xlsx")" download>Скачать XLSX</a>
+            <a class="ef-button ef-button--quiet" href="@($"api/assignments/{_selectedAssignmentId}/gradebook.csv")" download>CSV</a>
+        </p>
+    </section>
+}
+
+@code {
+    private Guid? _selectedAssignmentId;
+    private readonly List<TeacherAssignmentDto> _assignments = [];
+    private AssignmentStatsDto? _stats;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _assignments.AddRange(await AssignmentsService.ListAssignmentsAsync(await ActorAsync(), CancellationToken.None));
+        // Автовыбор первого назначения: сводка показывается сразу без лишнего клика.
+        _selectedAssignmentId = _assignments.FirstOrDefault()?.AssignmentId;
+        if (_selectedAssignmentId is { } id)
+            _stats = await ResultsService.StatsAsync(await ActorAsync(), id, CancellationToken.None);
+    }
+
+    private async Task LoadStatsAsync()
+    {
+        if (_selectedAssignmentId is { } id)
+            _stats = await ResultsService.StatsAsync(await ActorAsync(), id, CancellationToken.None);
+    }
+
+    private async Task<TeacherActor> ActorAsync()
+    {
+        var state = await AuthState.GetAuthenticationStateAsync();
+        var user = await UserManager.GetUserAsync(state.User)
+            ?? throw new InvalidOperationException("Нет пользователя.");
+        return new TeacherActor(user.Id, await UserManager.IsInRoleAsync(user, AppRoles.Administrator));
+    }
+}
