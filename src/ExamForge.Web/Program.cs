@@ -13,6 +13,7 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -145,6 +146,19 @@ builder.Services.AddHostedService<ExamForge.Web.StartupWarmupService>();
 
 var app = builder.Build();
 var antiforgery = app.Services.GetRequiredService<IAntiforgery>();
+
+// За reverse proxy (nginx/Caddy на том же узле): восстанавливаем схему и IP клиента
+// из X-Forwarded-Proto / X-Forwarded-For, иначе HttpsRedirection, cookie SecurePolicy
+// и rate-limiter по IP работают неправильно. Middleware должен идти первым.
+// Очистка Known* допустима, потому что порт 8080 публикуется только на 127.0.0.1
+// и в docker-сети прокси — подделать заголовки извне нельзя.
+var forwarded = new ForwardedHeadersOptions
+{
+    ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto,
+};
+forwarded.KnownIPNetworks.Clear();
+forwarded.KnownProxies.Clear();
+app.UseForwardedHeaders(forwarded);
 
 // Утилиты одноразового запуска (деплой/разработка): применение миграций и сиды.
 if (args.Length >= 1)

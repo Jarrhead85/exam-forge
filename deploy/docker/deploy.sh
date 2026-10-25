@@ -22,8 +22,16 @@ echo "== 4. Миграции (однократно, вручную — §21.9) =
 docker compose run --rm app dotnet ExamForge.Web.dll --migrate
 
 echo "== 5. Ждём готовности БД/приложения =="
+# AllowedHosts проверяет Host-заголовок: smoke-тест идёт с доменным Host,
+# иначе App получит 400 (пустой checkHost возвращает не 200).
+# .env содержит EXAMFORGE_ALLOWED_HOSTS.
+if [ -f .env ]; then
+  # shellcheck disable=SC1091
+  . ./.env
+fi
+: "${EXAMFORGE_ALLOWED_HOSTS:=127.0.0.1}"
 for i in $(seq 1 30); do
-  if curl -sf -o /dev/null http://127.0.0.1:8080/; then echo "Приложение отвечает."; break; fi
+  if curl -sf -o /dev/null -H "Host: ${EXAMFORGE_ALLOWED_HOSTS%%,*}" http://127.0.0.1:8080/; then echo "Приложение отвечает."; break; fi
   sleep 2
   [ "$i" = 30 ] && { echo "Приложение не отвечает — смотрите docker compose logs app"; exit 1; }
 done
