@@ -7,6 +7,12 @@ namespace ExamForge.Domain.Attempts;
 /// </summary>
 public static class AttemptRules
 {
+    public static HashSet<Guid> BestAttemptIdsByStudent(IEnumerable<Attempt> attempts)
+        => attempts.Where(attempt => attempt.IsEligibleForBest)
+            .GroupBy(attempt => attempt.StudentProfileId ?? attempt.Id)
+            .Select(group => SelectBest(group)!.Id)
+            .ToHashSet();
+
     public static Attempt? SelectBest(IEnumerable<Attempt> attempts)
     {
         Attempt? best = null;

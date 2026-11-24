@@ -1,17 +1,14 @@
-﻿@page "/cabinet/reviews"
+@page "/cabinet/reviews"
 @layout Layout.TeacherLayout
 @attribute [Authorize]
 @* prerender: очередь видна сразу из SSR; форм нет — статическая отправка невозможна. *@
 @rendermode InteractiveServer
 @using ExamForge.Application.TeacherFlow
 @using ExamForge.Infrastructure.Identity
-@using ExamForge.Infrastructure.Persistence
 @using ExamForge.Infrastructure.Services
 @using Microsoft.AspNetCore.Identity
-@using Microsoft.EntityFrameworkCore
 @inject ManualReviewService ReviewService
 @inject TeacherAssignmentsService AssignmentsService
-@inject ExamForgeDbContext Db
 @inject UserManager<TeacherUser> UserManager
 @inject AuthenticationStateProvider AuthState
 
@@ -23,17 +20,52 @@
 <div class="ef-form">
     <div class="ef-field">
         <label for="r-assignment">Назначение</label>
-        <select id="r-assignment" @bind="_selectedAssignmentId" @bind:after="QueueReloadAsync">
-            <option value="">— выберите —</option>
+        <select id="r-assignment" @bind="_selectedAssignmentId" @bind:after="AssignmentChangedAsync" disabled="@_loading">
             @foreach (var a in _assignments)
             {
                 <option value="@a.AssignmentId">@a.TestTitle</option>
             }
         </select>
     </div>
+    @if (_selectedAssignmentId is not null)
+    {
+        <div class="ef-form ef-form--inline">
+            <div class="ef-field">
+                <label for="r-status">Статус</label>
+                <select id="r-status" @bind="_filter" @bind:after="ResetQueueAsync" disabled="@_loading">
+                    <option value="pending">Ждут проверки</option>
+                    <option value="finalized">Оценены</option>
+                    <option value="">Все</option>
+                </select>
+            </div>
+            <div class="ef-field">
+                <label for="r-group">Группа</label>
+                <select id="r-group" @bind="_group" @bind:after="ResetQueueAsync" disabled="@_loading">
+                    <option value="">Все группы</option>
+                    @foreach (var group in _groups) { <option value="@group">@group</option> }
+                </select>
+            </div>
+            <div class="ef-field">
+                <label for="r-question">Задание</label>
+                <select id="r-question" @bind="_questionId" @bind:after="ResetQueueAsync" disabled="@_loading">
+                    <option value="">Все задания</option>
+                    @foreach (var question in _questions) { <option value="@question.Id">@question.Prompt</option> }
+                </select>
+            </div>
+        </div>
+    }
 </div>
 
-@if (_selectedAssignmentId is { } assignmentId)
+@if (_error is not null)
+{
+    <p class="ef-form-error" role="alert">@_error</p>
+    <button class="ef-button ef-button--secondary" @onclick="AssignmentChangedAsync">Повторить загрузку</button>
+}
+else if (_loading)
+{
+    <p role="status">Загружаем работы…</p>
+}
+else if (_selectedAssignmentId is { } assignmentId)
 {
     @if (_queue.Count == 0)
     {
@@ -41,6 +73,7 @@
     }
     else
     {
+        <div class="ef-table-scroll" tabindex="0" role="region" aria-label="Очередь проверки">
         <table class="ef-table">
             <caption>Попытки назначения</caption>
             <thead>
@@ -62,38 +95,103 @@
                         <td>@item.PendingCriteria из @item.TotalCriteria</td>
                         <td>
                             <a class="ef-button ef-button--sm ef-button--secondary"
-                               href="@($"cabinet/reviews/{item.AttemptId}")">Открыть</a>
+                               href="@ReviewLink(item.AttemptId)">Открыть</a>
                         </td>
                     </tr>
                 }
             </tbody>
         </table>
+        </div>
+        @if (_page > 0 || _hasMore)
+        {
+            <div class="ef-actions">
+                <button class="ef-button ef-button--secondary" disabled="@(_loading || _page == 0)" @onclick="() => ChangePageAsync(-1)">Назад</button>
+                <span>Страница @(_page + 1)</span>
+                <button class="ef-button ef-button--secondary" disabled="@(_loading || !_hasMore)" @onclick="() => ChangePageAsync(1)">Далее</button>
+            </div>
+        }
     }
+}
+else
+{
+    <p>Назначений пока нет. <a href="cabinet/assignments">Создать назначение</a></p>
 }
 
 @code {
+    [SupplyParameterFromQuery(Name = "assignment")] public Guid? AssignmentId { get; set; }
+
+    private const int PageSize = 25;
     private Guid? _selectedAssignmentId;
-    private readonly List<TeacherAssignmentDto> _assignments = [];
-    private readonly List<ReviewQueueItemDto> _queue = [];
+    private IReadOnlyList<TeacherAssignmentDto> _assignments = [];
+    private IReadOnlyList<ReviewQueueItemDto> _queue = [];
+    private IReadOnlyList<string> _groups = [];
+    private IReadOnlyList<(Guid Id, string Prompt)> _questions = [];
+    private string _filter = "pending";
+    private string? _group;
+    private Guid? _questionId;
+    private string? _error;
+    private bool _loading;
+    private bool _hasMore;
+    private int _page;
 
     protected override async Task OnInitializedAsync()
     {
         var actor = await ActorAsync();
-        _assignments.AddRange(await AssignmentsService.ListAssignmentsAsync(actor, CancellationToken.None));
-        // Автовыбор первого назначения: преподаватель сразу видит очередь без лишнего клика.
-        _selectedAssignmentId = _assignments.FirstOrDefault()?.AssignmentId;
-        if (_selectedAssignmentId is { } id)
-            _queue.AddRange(await ReviewService.GetQueueAsync(actor, id, null, CancellationToken.None));
+        _assignments = await AssignmentsService.ListAssignmentsAsync(actor, CancellationToken.None);
+        _selectedAssignmentId = _assignments.Any(assignment => assignment.AssignmentId == AssignmentId)
+            ? AssignmentId : _assignments.FirstOrDefault()?.AssignmentId;
+        await AssignmentChangedAsync();
     }
 
-    private async Task QueueReloadAsync()
+    private async Task AssignmentChangedAsync()
     {
-        if (_selectedAssignmentId is { } assignmentId)
+        _group = null;
+        _questionId = null;
+        _page = 0;
+        await ReloadAsync(refreshFilters: true);
+    }
+
+    private async Task ResetQueueAsync()
+    {
+        _page = 0;
+        await ReloadAsync();
+    }
+
+    private async Task ChangePageAsync(int direction)
+    {
+        _page += direction;
+        await ReloadAsync();
+    }
+
+    private async Task ReloadAsync(bool refreshFilters = false)
+    {
+        if (_loading || _selectedAssignmentId is not { } assignmentId)
+            return;
+
+        _loading = true;
+        _error = null;
+        try
         {
-            _queue.Clear();
-            _queue.AddRange(await ReviewService.GetQueueAsync(await ActorAsync(), assignmentId, null, CancellationToken.None));
+            var actor = await ActorAsync();
+            if (refreshFilters)
+                (_groups, _questions) = await ReviewService.GetFiltersAsync(actor, assignmentId, CancellationToken.None);
+            var items = await ReviewService.GetQueueAsync(actor, assignmentId, _filter, _group, _questionId,
+                _page * PageSize, PageSize + 1, CancellationToken.None);
+            _hasMore = items.Count > PageSize;
+            _queue = [.. items.Take(PageSize)];
+        }
+        catch (ExamForge.Application.StudentFlow.StudentFlowException ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _loading = false;
         }
     }
+
+    private string ReviewLink(Guid id)
+        => $"cabinet/reviews/{id}?group={Uri.EscapeDataString(_group ?? "")}" + (_questionId is { } question ? $"&question={question}" : "");
 
     private async Task<TeacherActor> ActorAsync()
     {

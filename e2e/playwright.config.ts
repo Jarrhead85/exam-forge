@@ -11,6 +11,7 @@ import { defineConfig } from "@playwright/test";
  * Сессия сидера: global-setup вызывает `dotnet run -- --seed-e2e .state/seed.json`;
  * E2E_SKIP_SEED=1 пропускает засев, если артефакт уже лежит на диске.
  */
+const configuration = process.env.E2E_CONFIGURATION ?? "Release";
 const port = Number(process.env.E2E_PORT ?? 5080);
 const baseURL = process.env.E2E_BASE_URL ?? `http://127.0.0.1:${port}`;
 
@@ -19,21 +20,21 @@ export default defineConfig({
   globalSetup: "./global-setup.ts",
   timeout: 120_000,
   expect: { timeout: 20_000 },
-  // Общая БД и лимит на обмен кодом (15/мин по IP): один воркер, последовательные тесты.
   fullyParallel: false,
   workers: 1,
   reporter: process.env.CI ? [["github"], ["list", { printSteps: true }]] : "list",
   use: {
     baseURL,
+    ignoreHTTPSErrors: process.env.E2E_IGNORE_HTTPS_ERRORS === "1",
     trace: "retain-on-failure",
     locale: "ru-RU",
   },
   webServer:
     process.env.E2E_WEB_SERVER === "managed"
       ? {
-          command: `dotnet run --project ../src/ExamForge.Web --no-build --urls ${baseURL}`,
+          command: `dotnet run --project ../src/ExamForge.Web --no-build --no-launch-profile --configuration ${configuration} --urls ${baseURL}`,
           url: baseURL,
-          reuseExistingServer: true,
+          reuseExistingServer: false,
           timeout: 300_000,
           env: {
             // БД и ключ — только через переменные окружения; ключ HMAC нужен приложению

@@ -1,4 +1,4 @@
-﻿@page "/cabinet/assignments"
+@page "/cabinet/assignments"
 @layout Layout.TeacherLayout
 @attribute [Authorize]
 @* prerender: содержимое видно мгновенно; формы защищены submit-блокировщиком в App.razor *@
@@ -26,6 +26,10 @@
         Назначение связывает версию теста со студентами. После создания добавьте студентов в карточке
         назначения и передайте каждому одноразовый код — студент введёт его на странице «Студентам» (<span class="ef-mono">/exam</span>).
     </p>
+    @if (_templateLoaded)
+    {
+        <p class="ef-callout ef-callout--info">Параметры заполнены из предыдущей работы. Выберите новые даты и выдайте коды после создания.</p>
+    }
     @if (_versions.Count == 0)
     {
         <div class="ef-callout ef-callout--info">
@@ -48,7 +52,7 @@
                 </div>
                 <div class="ef-field">
                     <label for="a-mode">Режим</label>
-                    <select id="a-mode" @bind="Form.Mode">
+                    <select id="a-mode" @bind="Form.Mode" @bind:after="ApplyModeDefaults">
                         <option value="Assessment">Контрольная</option>
                         <option value="Practice">Тренировка</option>
                     </select>
@@ -60,7 +64,8 @@
             </div>
             <div class="ef-form ef-form--inline">
                 <div class="ef-field">
-                    <label for="a-opens">Открыто с</label>
+                    <label for="a-opens">Открыть с (необязательно)</label>
+                    <p class="ef-card__meta">Часовой пояс: @TimeZoneInfo.Local.Id. Пустое поле — открыть сразу.</p>
                     <input id="a-opens" type="datetime-local" @bind="Form.OpensLocal" />
                 </div>
                 <div class="ef-field">
@@ -74,17 +79,16 @@
                 </div>
                 <div class="ef-field">
                     <label for="a-total">Общий лимит попытки, минут (необязательно)</label>
-                    <InputNumber id="a-total" @bind-Value="Form.TotalTimeLimitMinutes" min="1" max="600" />
+                    <InputNumber id="a-total" @bind-Value="Form.TotalTimeLimitMinutes" min="0.01" max="600" step="any" />
+                    <ValidationMessage For="() => Form.TotalTimeLimitMinutes" />
                 </div>
             </div>
-            <div class="ef-field ef-field--check">
-                <label><input type="checkbox" @bind="Form.NoBacktracking" /> Запретить возврат к прошлым вопросам</label>
-            </div>
+            <p class="ef-card__meta">Студенты проходят вопросы по порядку. После перехода ответ закрывается.</p>
             @if (_createError is not null)
             {
                 <p class="ef-form-error" role="alert">@_createError</p>
             }
-            <button class="ef-button ef-button--primary" type="submit" disabled="@_busy">Создать</button>
+            <button class="ef-button ef-button--primary" type="submit" disabled="@(_busy || !RendererInfo.IsInteractive)">Создать</button>
         </EditForm>
     }
 </section>
@@ -145,6 +149,7 @@ else
     private CreateFormModel Form { get; set; } = new();
     private string? _createError;
     private bool _busy;
+    private bool _templateLoaded;
     private Guid? _confirmDeleteId;
 
     private sealed class CreateFormModel
@@ -153,12 +158,12 @@ else
         public Guid? TestVersionId { get; set; }
         public string Mode { get; set; } = "Assessment";
         [System.ComponentModel.DataAnnotations.Range(1, 10)]
-        public int MaxAttempts { get; set; } = 2;
+        public int MaxAttempts { get; set; } = 1;
         [System.ComponentModel.DataAnnotations.Range(5, 3600)]
         public int? PerQuestionTimeLimitSeconds { get; set; }
-        public bool NoBacktracking { get; set; } = true;
         public DateTime? ClosesLocal { get; set; }
-        public int? TotalTimeLimitMinutes { get; set; }
+        [System.ComponentModel.DataAnnotations.Range(typeof(decimal), "0.01", "600", ErrorMessage = "Укажите время от одной секунды до 600 минут.")]
+        public decimal? TotalTimeLimitMinutes { get; set; }
         public DateTime? OpensLocal { get; set; }
     }
 
@@ -170,6 +175,25 @@ else
         if (Guid.TryParse(query["version"], out var fromTests)
             && _versions.Any(v => v.Id == fromTests))
             Form.TestVersionId = fromTests;
+
+        if (Guid.TryParse(query["template"], out var assignmentId))
+        {
+            try
+            {
+                var template = await AssignmentsService.GetTemplateAsync(await ActorAsync(), assignmentId, CancellationToken.None);
+                Form.TestVersionId = template.TestVersionId;
+                Form.Mode = template.Mode;
+                Form.MaxAttempts = template.MaxAttempts;
+                Form.PerQuestionTimeLimitSeconds = template.PerQuestionTimeLimitSeconds;
+                Form.TotalTimeLimitMinutes = template.AttemptTotalTimeLimitSeconds is { } seconds
+                    ? Math.Round(seconds / 60m, 2) : null;
+                _templateLoaded = true;
+            }
+            catch (ExamForge.Application.StudentFlow.StudentFlowException ex)
+            {
+                _createError = ex.Message;
+            }
+        }
     }
 
     private async Task ReloadAsync()
@@ -196,6 +220,12 @@ else
         return new TeacherActor(user.Id, await UserManager.IsInRoleAsync(user, AppRoles.Administrator));
     }
 
+    private void ApplyModeDefaults()
+    {
+        Form.MaxAttempts = Form.Mode == "Practice" ? 3 : 1;
+        Form.PerQuestionTimeLimitSeconds = null;
+    }
+
     private async Task CreateAsync()
     {
         _busy = true;
@@ -212,10 +242,11 @@ else
                 new DateTimeOffset(opensLocal, TimeZoneInfo.Local.GetUtcOffset(opensLocal)), closesUtc,
                 Form.MaxAttempts,
                 Form.PerQuestionTimeLimitSeconds,
-                Form.TotalTimeLimitMinutes is { } minutes ? minutes * 60 : null,
-                Form.NoBacktracking);
+                Form.TotalTimeLimitMinutes is { } minutes ? (int)Math.Round(minutes * 60, MidpointRounding.AwayFromZero) : null,
+                NoBacktracking: true);
             await AssignmentsService.CreateAssignmentAsync(actor, request, CancellationToken.None);
             Form = new CreateFormModel();
+            _templateLoaded = false;
             await ReloadAsync();
         }
         catch (Exception ex)

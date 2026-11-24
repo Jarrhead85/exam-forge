@@ -18,6 +18,8 @@ public sealed class StudentAccount
     /// <summary>PBKDF2-хеш (Identity PasswordHasher); пароль нигде не хранится открыто.</summary>
     public string PasswordHash { get; private set; } = string.Empty;
 
+    public Guid SessionVersion { get; private set; } = Guid.NewGuid();
+
     public bool IsDisabled { get; private set; }
     public int FailedAttempts { get; private set; }
     public DateTimeOffset? LockedUntilUtc { get; private set; }
@@ -57,11 +59,16 @@ public sealed class StudentAccount
     public void ChangePassword(string newPasswordHash, DateTimeOffset nowUtc)
     {
         PasswordHash = Guard.Required(newPasswordHash, "Хеш пароля", 500);
+        SessionVersion = Guid.NewGuid();
         FailedAttempts = 0;
         LockedUntilUtc = null;
     }
 
-    public void Disable(DateTimeOffset nowUtc) => IsDisabled = true;
+    public void Disable(DateTimeOffset nowUtc)
+    {
+        IsDisabled = true;
+        SessionVersion = Guid.NewGuid();
+    }
 
     /// <summary>Повторное включение аккаунта преподавателем (после Disable).</summary>
     public void Enable(DateTimeOffset nowUtc)

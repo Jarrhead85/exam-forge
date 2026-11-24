@@ -5,6 +5,12 @@ export interface E2ESeed {
   teacherLogin: string;
   teacherPassword: string;
   invitationCode: string;
+  revisitCode: string;
+  offlineCode: string;
+  accountLogin: string;
+  accountPassword: string;
+  commonLinkCode: string;
+  assignmentId: string;
   assignmentTitle: string;
   testTitle: string;
   subjectName: string;

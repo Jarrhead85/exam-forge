@@ -1,4 +1,4 @@
-﻿@page "/cabinet/tests"
+@page "/cabinet/tests"
 @layout Layout.TeacherLayout
 @attribute [Authorize]
 @* prerender: содержимое видно мгновенно; формы защищены submit-блокировщиком в App.razor *@
@@ -49,7 +49,7 @@
                         }
                     </select>
                 </div>
-                <button class="ef-button ef-button--primary" type="submit" disabled="@_busy">Создать</button>
+                <button class="ef-button ef-button--primary" type="submit" disabled="@(_busy || !RendererInfo.IsInteractive)">Создать</button>
             </div>
         </EditForm>
     }
@@ -105,7 +105,7 @@
                 <span class="ef-card__meta">заданий: @version.QuestionCount · баллов: @version.MaxPoints.ToString("0.##")</span>
                 @if (!version.IsPublished)
                 {
-                    <button class="ef-button ef-button--sm ef-button--primary" @onclick="() => PublishVersionAsync(version.VersionId)" disabled="@_busy">
+                    <button class="ef-button ef-button--sm ef-button--primary" @onclick="() => PublishVersionAsync(version.VersionId)" disabled="@(_busy || !RendererInfo.IsInteractive)">
                         Опубликовать
                     </button>
                     <span class="ef-card__meta">публикация нужна до генерации вариантов</span>
@@ -127,13 +127,13 @@
                 <button class="ef-button ef-button--primary" @onclick="() => GenerateAsync(version)" disabled="@(_busy || !version.IsPublished)">
                     Сгенерировать варианты
                 </button>
-                @if (version.Variants.Count > 0)
+                @if (version.IsPublished)
                 {
-                    <a class="ef-button ef-button--primary"
-                       href="@($"cabinet/assignments?version={version.VersionId}")">
-                        Создать назначение →
-                    </a>
+                    <a class="ef-button ef-button--primary" href="@($"cabinet/assignments?version={version.VersionId}")">Создать назначение</a>
                 }
+                <a class="ef-button ef-button--quiet" href="@($"cabinet/preview/test/{version.VersionId}")">Пройти пробно</a>
+                <button class="ef-button ef-button--quiet" disabled="@(_busy || !RendererInfo.IsInteractive)"
+                        @onclick="() => DuplicateAsync(version.VersionId)">Копировать в черновик</button>
             </div>
 
             @if (version.Variants.Count > 0)
@@ -196,13 +196,13 @@
                         }
                     </tbody>
                 </table>
-                <button class="ef-button ef-button--secondary" @onclick="() => CreateVersionAsync(test)" disabled="@_busy">
+                <button class="ef-button ef-button--secondary" @onclick="() => CreateVersionAsync(test)" disabled="@(_busy || !RendererInfo.IsInteractive)">
                     Создать версию из отмеченных
                 </button>
             }
 
             <details>
-                <summary class="ef-card__meta">Blueprint-предпросмотр: сколько заданий банк даёт по типам</summary>
+                <summary class="ef-card__meta">Подбор по типам: сколько заданий есть в банке</summary>
                 <div class="ef-form ef-form--inline">
                     <div class="ef-field">
                         <label for="bp-@test.TestId">Тип</label>
@@ -246,6 +246,10 @@
     </section>
 }
 
+@if (_notice is not null)
+{
+    <p class="ef-callout ef-callout--info" role="status">@_notice</p>
+}
 @if (_error is not null)
 {
     <p class="ef-form-error" role="alert">@_error</p>
@@ -287,6 +291,7 @@
     private readonly List<QuestionRow> _publishedQuestions = [];
     private TestFormModel TestForm { get; set; } = new();
     private string? _error;
+    private string? _notice;
     private bool _busy;
     private string? _blueprintType;
     private int _blueprintCount = 5;
@@ -486,6 +491,28 @@
         }
         catch (Exception ex) { _error = ex.Message; }
         finally { _busy = false; }
+    }
+
+    private async Task DuplicateAsync(Guid versionId)
+    {
+        if (_busy)
+            return;
+        _busy = true;
+        _error = null;
+        try
+        {
+            await TestVersions.DuplicateAsDraftAsync(await ActorAsync(), versionId, CancellationToken.None);
+            await ReloadAsync();
+            _notice = "Создана копия теста с новой версией-черновиком.";
+        }
+        catch (ExamForge.Application.StudentFlow.StudentFlowException ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _busy = false;
+        }
     }
 
     private async Task PreviewBlueprintAsync()

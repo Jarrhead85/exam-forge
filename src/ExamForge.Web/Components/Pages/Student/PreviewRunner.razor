@@ -1,0 +1,205 @@
+@using System.Text.Json
+@using ExamForge.Application.StudentFlow
+@using ExamForge.Domain.Attempts
+@using ExamForge.Domain.Questions
+@using ExamForge.Infrastructure.Services
+@using ExamForge.Web.Client
+@inject TimeProvider Clock
+@implements IDisposable
+
+<section class="ef-card" aria-labelledby="preview-title">
+    <p class="ef-card__eyebrow">Пробное прохождение</p>
+    <h1 id="preview-title" class="ef-card__title">@Plan.Title</h1>
+    <p class="ef-card__meta">@Description</p>
+
+    @if (_error is not null)
+    {
+        <p class="ef-form-error" role="alert">@_error</p>
+    }
+
+    @if (Plan.Questions.Count == 0)
+    {
+        <p>Добавьте вопросы, чтобы пройти тест.</p>
+    }
+    else if (_finished)
+    {
+        <h2>Пробная работа завершена</h2>
+        <p class="ef-exam-score">@_earned.ToString("0.##") из @_possible.ToString("0.##") баллов</p>
+        @if (_needsReview)
+        {
+            <p>В этой версии есть задания для ручной проверки. Они не входят в показанные баллы.</p>
+        }
+        <button class="ef-button ef-button--primary" @onclick="Start">Пройти ещё раз</button>
+    }
+    else if (_question is null)
+    {
+        <p>Вопросов: @Plan.Questions.Count. Время на первый вопрос начнётся при открытии.</p>
+        <button class="ef-button ef-button--primary" @onclick="Start" disabled="@(!RendererInfo.IsInteractive)">Открыть первый вопрос</button>
+    }
+    else
+    {
+        <div class="ef-exam-statusbar">
+            <span class="ef-badge">Вопрос @(_index + 1) из @Plan.Questions.Count</span>
+            @if (TimeLeft(_session?.DeadlineUtc) is { } questionTime)
+            {
+                <span class="ef-badge">На вопрос @Format(questionTime)</span>
+            }
+            @if (TimeLeft(_workDeadline) is { } workTime)
+            {
+                <span class="ef-badge">На работу @Format(workTime)</span>
+            }
+        </div>
+        <h2 tabindex="-1" @ref="_heading">@_question.Prompt</h2>
+        @if (_question.Instruction is { } instruction)
+        {
+            <p>@instruction</p>
+        }
+        <fieldset class="ef-exam-editor" disabled="@(_session?.State != QuestionSessionState.Active)">
+            <legend class="ef-sr-only">Ответ</legend>
+            <QuestionEditor @key="_question.QuestionSessionId" @ref="_editor" Question="_question" OnChanged="SaveAnswer" />
+        </fieldset>
+        @if (_session?.State == QuestionSessionState.LockedTimedOut)
+        {
+            <p class="ef-callout ef-callout--warning" role="alert">Время на вопрос истекло.</p>
+        }
+        <div class="ef-exam-actions">
+            <button class="ef-button ef-button--primary" @onclick="Next">@(_index + 1 == Plan.Questions.Count ? "Завершить пробную работу" : "Далее")</button>
+        </div>
+    }
+</section>
+
+@code {
+    [Parameter, EditorRequired] public ExamPreviewPlan Plan { get; set; } = default!;
+    [Parameter, EditorRequired] public string Description { get; set; } = "";
+
+    private QuestionSession? _session;
+    private StudentQuestionDto? _question;
+    private QuestionEditor? _editor;
+    private QuestionAnswer? _answer;
+    private DateTimeOffset? _workDeadline;
+    private System.Timers.Timer? _timer;
+    private ElementReference _heading;
+    private int _index;
+    private decimal _earned;
+    private decimal _possible;
+    private bool _finished;
+    private bool _needsReview;
+    private bool _focus;
+    private bool _disposed;
+    private string? _error;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_focus)
+        {
+            _focus = false;
+            await _heading.FocusAsync();
+        }
+    }
+
+    private void Start()
+    {
+        _error = null;
+        var now = Clock.GetUtcNow();
+        var workDeadline = Plan.TotalTimeLimitSeconds is { } limit ? now.AddSeconds(limit) : (DateTimeOffset?)null;
+        if (Plan.ClosesAtUtc is { } closes && closes > now && (workDeadline is null || closes < workDeadline))
+            workDeadline = closes;
+
+        if (workDeadline is null && Plan.PerQuestionTimeLimitSeconds is null &&
+            Plan.Questions.Any(question => question.Version.ProposedTimeLimitSeconds is null))
+        {
+            _error = "У некоторых вопросов нет времени. Задайте лимит в назначении или в настройках вопросов.";
+            return;
+        }
+
+        _index = 0;
+        _earned = _possible = 0;
+        _finished = _needsReview = false;
+        _workDeadline = workDeadline;
+        Open();
+        _timer ??= CreateTimer();
+        _timer.Start();
+    }
+
+    private System.Timers.Timer CreateTimer()
+    {
+        var timer = new System.Timers.Timer(1000);
+        timer.Elapsed += (_, _) => _ = InvokeAsync(Tick);
+        return timer;
+    }
+
+    private void Open()
+    {
+        var item = Plan.Questions[_index];
+        _session = QuestionSession.Create(Guid.NewGuid(), item.Version.Id, _index);
+        var limit = Plan.PerQuestionTimeLimitSeconds ?? item.Version.ProposedTimeLimitSeconds;
+        _session.Open(Clock.GetUtcNow(), limit is { } seconds ? TimeSpan.FromSeconds(seconds) : null, _workDeadline, null);
+        _question = StudentQuestionProjection.Create(_session.Id, item.Version.Id, _index,
+            item.Definition, item.Version.ProposedTimeLimitSeconds, Plan.Variant);
+        _answer = null;
+        _focus = true;
+    }
+
+    private void SaveAnswer()
+    {
+        if (_editor is not null && _session?.CanAcceptAnswer(Clock.GetUtcNow()) == true)
+            _answer = QuestionAnswerValidator.Parse(Plan.Questions[_index].Definition,
+                JsonSerializer.SerializeToElement(_editor.BuildAnswer()));
+    }
+
+    private void Next()
+    {
+        if (_finished || _question is null)
+            return;
+        Evaluate(Plan.Questions[_index], _answer);
+        if (++_index == Plan.Questions.Count)
+            Finish();
+        else
+            Open();
+    }
+
+    private void Evaluate(PreviewQuestion question, QuestionAnswer? answer)
+    {
+        var outcome = AnswerGrader.Grade(question.Definition, answer);
+        _needsReview |= outcome.NeedsManualReview;
+        if (!outcome.NeedsManualReview)
+        {
+            _earned += outcome.EarnedPoints;
+            _possible += outcome.MaxPoints;
+        }
+    }
+
+    private void Tick()
+    {
+        if (_disposed || _finished)
+            return;
+
+        var now = Clock.GetUtcNow();
+        _session?.ExpireIfDue(now);
+        if (_workDeadline is { } deadline && now >= deadline)
+        {
+            Evaluate(Plan.Questions[_index], _answer);
+            foreach (var remaining in Plan.Questions.Skip(_index + 1))
+                Evaluate(remaining, null);
+            Finish();
+        }
+        StateHasChanged();
+    }
+
+    private void Finish()
+    {
+        _finished = true;
+        _timer?.Stop();
+    }
+
+    private TimeSpan? TimeLeft(DateTimeOffset? deadline)
+        => deadline is { } end ? TimeSpan.FromSeconds(Math.Max(0, Math.Ceiling((end - Clock.GetUtcNow()).TotalSeconds))) : null;
+
+    private static string Format(TimeSpan time) => $"{(int)time.TotalMinutes:00}:{time.Seconds:00}";
+
+    public void Dispose()
+    {
+        _disposed = true;
+        _timer?.Dispose();
+    }
+}

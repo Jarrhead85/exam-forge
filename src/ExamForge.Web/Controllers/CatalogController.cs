@@ -18,7 +18,6 @@ public sealed class CatalogController(
     AdminTeachersService adminTeachers,
     ResultsService results,
     TeacherQuestionsService questions,
-    TeacherAssignmentsService assignments,
     ExamForgeDbContext db,
     TimeProvider timeProvider,
     UserManager<TeacherUser> userManager) : ControllerBase
@@ -189,9 +188,7 @@ public sealed class CatalogController(
     [HttpGet("/api/assignments/{assignmentId:guid}/gradebook.xlsx")]
     public async Task<IActionResult> GradebookXlsx(Guid assignmentId, CancellationToken ct)
     {
-        var actor = await ActorAsync();
-        var details = await assignments.GetAssignmentAsync(actor, assignmentId, ct);
-        var bytes = await results.GradebookXlsxAsync(actor, assignmentId, details.Assignment.TestTitle, ct);
+        var bytes = await results.GradebookXlsxAsync(await ActorAsync(), assignmentId, ct);
         return File(bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             $"gradebook-{assignmentId:N}.xlsx");
     }

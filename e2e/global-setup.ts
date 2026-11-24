@@ -23,21 +23,22 @@ export default function globalSetup(): void {
   const dotnet = process.env.DOTNET_EXE ?? "dotnet";
   const project = path.resolve(__dirname, "..", "src", "ExamForge.Web");
   const db = process.env.E2E_DB ?? "Host=localhost;Port=5432;Database=examforge_e2e;Username=postgres";
-  const env = { ...process.env, ConnectionStrings__Default: db };
+  const configuration = process.env.E2E_CONFIGURATION ?? "Release";
+  const env = { ...process.env, ConnectionStrings__Default: db, ASPNETCORE_ENVIRONMENT: "Development" };
 
   mkdirSync(path.resolve(__dirname, ".state"), { recursive: true });
 
   const artifact = path.resolve(__dirname, ".state", "seed.json");
   const common = { stdio: "inherit" as const, env };
 
-  const migrate = spawnSync(dotnet, ["run", "--project", project, "--no-build", "--", "--migrate"], common);
+  const migrate = spawnSync(dotnet, ["run", "--project", project, "--no-build", "--no-launch-profile", "--configuration", configuration, "--", "--migrate"], common);
   if (migrate.status !== 0) {
     throw new Error("Миграции E2E-БД не применились (см. вывод выше). Сайт собран? (dotnet build перед прогоном)");
   }
 
   const seed = spawnSync(
     dotnet,
-    ["run", "--project", project, "--no-build", "--", "--seed-e2e", artifact],
+    ["run", "--project", project, "--no-build", "--no-launch-profile", "--configuration", configuration, "--", "--seed-e2e", artifact],
     common,
   );
   if (seed.status !== 0) {

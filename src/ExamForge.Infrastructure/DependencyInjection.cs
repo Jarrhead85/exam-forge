@@ -17,7 +17,7 @@ public static class DependencyInjection
         var dataSource = new NpgsqlDataSourceBuilder(connectionString)
             .EnableDynamicJson()
             .Build();
-        services.AddDbContext<ExamForgeDbContext>(options =>
+        services.AddDbContextFactory<ExamForgeDbContext>(options =>
             options.UseNpgsql(dataSource, npgsql =>
                 npgsql.EnableRetryOnFailure(maxRetryCount: 3)));
 

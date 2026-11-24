@@ -13,6 +13,9 @@ public static class StudentAuth
     public const string AssignmentClaim = "asg";
     public const string StudentProfileClaim = "stp";
     public const string GroupClaim = "grp";
+    internal const string AccountClaim = "account";
+    internal const string SessionVersionClaim = "version";
+    internal const string LinkClaim = "link";
 
     public static ClaimsPrincipal CreatePrincipal(Domain.Assignments.Invitation invitation)
     {
@@ -23,16 +26,19 @@ public static class StudentAuth
         };
         if (invitation.StudentProfileId is { } profileId)
             claims.Add(new Claim(StudentProfileClaim, profileId.ToString()));
+        if (invitation.GroupNameSnapshot is { } group)
+            claims.Add(new Claim(GroupClaim, group));
         return new ClaimsPrincipal(new ClaimsIdentity(claims, Scheme));
     }
 
     /// <summary>Сессия входа по общей ссылке (ТЗ §5.1): назначение + эфемерный профиль + группа.</summary>
-    public static ClaimsPrincipal CreateCommonLinkPrincipal(Guid assignmentId, Guid profileId, string? group)
+    public static ClaimsPrincipal CreateCommonLinkPrincipal(Guid assignmentId, Guid profileId, string linkCode, string? group)
     {
         var claims = new List<Claim>
         {
             new(AssignmentClaim, assignmentId.ToString()),
             new(StudentProfileClaim, profileId.ToString()),
+            new(LinkClaim, linkCode),
         };
         if (!string.IsNullOrWhiteSpace(group))
             claims.Add(new Claim(GroupClaim, group.Trim()));
@@ -42,7 +48,11 @@ public static class StudentAuth
     /// <summary>Сессия постоянного аккаунта (ТЗ §5.3): без привязки к одному назначению.</summary>
     public static ClaimsPrincipal CreateAccountPrincipal(Domain.People.StudentAccount account)
         => new(new ClaimsIdentity(
-            [new Claim(StudentProfileClaim, account.StudentProfileId.ToString())],
+            [
+                new Claim(StudentProfileClaim, account.StudentProfileId.ToString()),
+                new Claim(AccountClaim, account.Id.ToString()),
+                new Claim(SessionVersionClaim, account.SessionVersion.ToString())
+            ],
             Scheme));
 
     /// <summary>Идентичность студента из claims; null, если claims неполные.</summary>

@@ -1,4 +1,4 @@
-﻿@page "/cabinet/groups"
+@page "/cabinet/groups"
 @layout Layout.TeacherLayout
 @attribute [Authorize]
 @* prerender: содержимое видно мгновенно; формы защищены submit-блокировщиком в App.razor *@
@@ -25,7 +25,7 @@
             <InputText id="g-name" @bind-Value="CreateForm.Name" autocomplete="off" placeholder="ЛД-201" />
             <ValidationMessage For="() => CreateForm.Name" />
         </div>
-        <button class="ef-button ef-button--primary" type="submit" disabled="@_busy">Создать</button>
+        <button class="ef-button ef-button--primary" type="submit" disabled="@(_busy || !RendererInfo.IsInteractive)">Создать</button>
     </EditForm>
 </section>
 
@@ -46,7 +46,7 @@
 }
 @foreach (var group in _groups)
 {
-    <section class="ef-card" aria-labelledby="grp-@group.GroupId">
+    <section @key="group.GroupId" class="ef-card" aria-labelledby="grp-@group.GroupId">
         @if (_editGroupId == group.GroupId)
         {
             <div class="ef-form ef-form--inline">
@@ -97,9 +97,11 @@
                     <label for="@($"ns-middle-{group.GroupId}")">Отчество (если есть)</label>
                     <InputText id="@($"ns-middle-{group.GroupId}")" @bind-Value="NewStudentForm.MiddleName" autocomplete="off" />
                 </div>
-                <button class="ef-button ef-button--sm ef-button--secondary" type="submit">+ студент</button>
+                <button class="ef-button ef-button--sm ef-button--secondary" type="submit" disabled="@(!RendererInfo.IsInteractive || _busy)">Добавить студента</button>
             </div>
         </EditForm>
+
+        <GroupRosterImport GroupId="group.GroupId" Actor="ActorAsync" OnImported="() => ReloadImportedAsync(group.GroupId)" />
 
         @if (_members.TryGetValue(group.GroupId, out var members) && members.Count > 0)
         {
@@ -239,8 +241,16 @@
 
     private async Task ReloadAsync()
     {
+        var groups = await GroupService.ListAsync(await ActorAsync(), CancellationToken.None);
         _groups.Clear();
-        _groups.AddRange(await GroupService.ListAsync(await ActorAsync(), CancellationToken.None));
+        _groups.AddRange(groups);
+    }
+
+    private async Task ReloadImportedAsync(Guid groupId)
+    {
+        if (_members.ContainsKey(groupId))
+            _members[groupId] = [.. await GroupService.MembersAsync(await ActorAsync(), groupId, CancellationToken.None)];
+        await ReloadAsync();
     }
 
     private async Task CreateGroupAsync()

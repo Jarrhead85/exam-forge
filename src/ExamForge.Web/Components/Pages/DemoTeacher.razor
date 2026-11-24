@@ -1,0 +1,35 @@
+@page "/demo/teacher"
+
+<PageTitle>Пример работы преподавателя — Exam Forge</PageTitle>
+
+<h1>Контрольная по медицинской латыни</h1>
+<p class="ef-card__meta">Демонстрация кабинета с вымышленными данными.</p>
+
+<div class="ef-portal-grid">
+    <section class="ef-card" aria-labelledby="demo-test-title">
+        <h2 id="demo-test-title" class="ef-card__title">Подготовить тест</h2>
+        <p>Версия 1 · 3 вопроса · 3 балла. На вопрос — 1 минута.</p>
+        <a class="ef-button ef-button--secondary" href="demo">Открыть глазами студента</a>
+    </section>
+    <section class="ef-card" aria-labelledby="demo-assignment-title">
+        <h2 id="demo-assignment-title" class="ef-card__title">Назначить группе</h2>
+        <p><strong>МЛ-101</strong> · 24 студента · коды выданы</p>
+        <p>18 завершили работу, 4 проходят, 2 ещё не начали.</p>
+    </section>
+</div>
+
+<section class="ef-card" aria-labelledby="demo-results-title">
+    <h2 id="demo-results-title" class="ef-card__title">Ведомость</h2>
+    <div class="ef-table-scroll" tabindex="0" role="region" aria-label="Пример ведомости">
+        <table class="ef-table">
+            <caption>Три строки из группы МЛ-101</caption>
+            <thead><tr><th scope="col">Студент</th><th scope="col">Статус</th><th scope="col">Баллы</th></tr></thead>
+            <tbody>
+                <tr><td>Софья Иванова</td><td>Оценено</td><td>3 из 3</td></tr>
+                <tr><td>Алексей Петров</td><td>Проходит</td><td>—</td></tr>
+                <tr><td>Дарья Смирнова</td><td>Не начала</td><td>—</td></tr>
+            </tbody>
+        </table>
+    </div>
+</section>
+<a class="ef-button ef-button--primary" href="account/login">Войти в кабинет</a>

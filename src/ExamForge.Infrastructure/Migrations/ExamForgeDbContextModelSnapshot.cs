@@ -18,7 +18,7 @@ namespace ExamForge.Infrastructure.Migrations
         {
 #pragma warning disable 612, 618
             modelBuilder
-                .HasAnnotation("ProductVersion", "10.0.13")
+                .HasAnnotation("ProductVersion", "10.0.14")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
@@ -148,6 +148,10 @@ namespace ExamForge.Infrastructure.Migrations
 
                     b.Property<int>("FailedAttempts")
                         .HasColumnType("integer");
+
+                    b.Property<string>("GroupNameSnapshot")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
 
                     b.Property<DateTimeOffset?>("LockedUntilUtc")
                         .HasColumnType("timestamp with time zone");
@@ -944,6 +948,9 @@ namespace ExamForge.Infrastructure.Migrations
                         .IsRequired()
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)");
+
+                    b.Property<Guid>("SessionVersion")
+                        .HasColumnType("uuid");
 
                     b.Property<Guid>("StudentProfileId")
                         .HasColumnType("uuid");

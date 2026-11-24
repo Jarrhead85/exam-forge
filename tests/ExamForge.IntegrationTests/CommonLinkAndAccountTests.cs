@@ -1,4 +1,4 @@
-﻿using System.Net;
+using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using ExamForge.Domain.Questions;
@@ -285,9 +285,26 @@ public sealed class CommonLinkAndAccountTests(ExamForgeWebFactory factory)
             new { studentProfileId = profileId });
         var account = await BodyAsync(createAccount);
         var login = account.GetProperty("login").GetString()!;
+        var oldSession = await AuthenticatedStudentAsync(factory,
+            client => client.PostAsJsonAsync("/api/access/login", new
+            {
+                login,
+                password = account.GetProperty("oneTimePassword").GetString(),
+            }));
+        var otherTeacher = await LoginTeacherAsync();
+        var (otherAssignment, _) = await CreateAssignmentAsync(otherTeacher);
+        var foreignProfile = await otherTeacher.PostAsJsonAsync($"/api/assignments/{otherAssignment}/student-accounts",
+            new { studentProfileId = profileId });
+        Assert.Equal(HttpStatusCode.NotFound, foreignProfile.StatusCode);
+
+        var foreignReset = await otherTeacher.PostAsJsonAsync(
+            $"/api/student-accounts/{account.GetProperty("accountId").GetGuid()}/reset-password?assignmentId={otherAssignment}", new { });
+        Assert.Equal(HttpStatusCode.NotFound, foreignReset.StatusCode);
+
         var newPasswordResponse = await teacher.PostAsJsonAsync(
             $"/api/student-accounts/{account.GetProperty("accountId").GetGuid()}/reset-password?assignmentId={assignmentId}", new { });
         newPasswordResponse.EnsureSuccessStatusCode();
+        Assert.Equal(HttpStatusCode.Unauthorized, (await oldSession.GetAsync("/api/student/assignments")).StatusCode);
         var newPassword = (await BodyAsync(newPasswordResponse)).GetProperty("oneTimePassword").GetString()!;
 
         var client = factory.CreateClient();

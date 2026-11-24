@@ -33,7 +33,7 @@ public sealed class DictionaryAuthorizationTests(ExamForgeWebFactory factory)
 
     /// <summary>Словарь с двумя записями (одна подтверждена) фиксированного владельца и режима.</summary>
     private async Task<(Guid DictionaryId, Guid EntryId)> SeedDictionaryAsync(
-        Guid ownerTeacherId, Dictionary.AccessMode mode, bool legacy = false)
+        Guid ownerTeacherId, Dictionary.AccessMode mode, bool legacy = false, bool returnDraft = false)
     {
         await using var db = NewDb();
         var subject = Subject.Create("Латынь-" + Guid.NewGuid().ToString("N")[..6], null, Now);
@@ -52,7 +52,7 @@ public sealed class DictionaryAuthorizationTests(ExamForgeWebFactory factory)
             ["uho"], null, [], "стр. 2", Now);
         db.DictionaryEntries.Add(draft);
         await db.SaveChangesAsync();
-        return (dictionary.Id, entry.Id);
+        return (dictionary.Id, returnDraft ? draft.Id : entry.Id);
     }
 
     private async Task<HttpClient> StrangerAsync()
@@ -175,7 +175,7 @@ public sealed class DictionaryAuthorizationTests(ExamForgeWebFactory factory)
         var (grantedClient, grantedId) = await TeacherLogin.CreateAndLoginAsync(factory);
         var (plainClient, plainId) = await TeacherLogin.CreateAndLoginAsync(factory);
         var (_, ownerId) = await TeacherLogin.CreateAndLoginAsync(factory);
-        var (dictionaryId, entryId) = await SeedDictionaryAsync(ownerId, Dictionary.AccessMode.SharedEdit);
+        var (dictionaryId, entryId) = await SeedDictionaryAsync(ownerId, Dictionary.AccessMode.SharedEdit, returnDraft: true);
 
         await using (var db = NewDb())
         {
@@ -203,7 +203,7 @@ public sealed class DictionaryAuthorizationTests(ExamForgeWebFactory factory)
     [Fact]
     public async Task LegacyDictionary_Stranger_CanReadAndConfirm()
     {
-        var (dictionaryId, entryId) = await SeedDictionaryAsync(Guid.NewGuid(), Dictionary.AccessMode.Private, legacy: true);
+        var (dictionaryId, entryId) = await SeedDictionaryAsync(Guid.NewGuid(), Dictionary.AccessMode.Private, legacy: true, returnDraft: true);
         var stranger = await StrangerAsync();
 
         var entries = await stranger.GetAsync($"/api/dictionaries/{dictionaryId}/entries");
@@ -223,7 +223,7 @@ public sealed class DictionaryAuthorizationTests(ExamForgeWebFactory factory)
     public async Task Administrator_ConfirmsForeignPrivateEntry()
     {
         var (_, ownerId) = await TeacherLogin.CreateAndLoginAsync(factory);
-        var (dictionaryId, entryId) = await SeedDictionaryAsync(ownerId, Dictionary.AccessMode.Private);
+        var (dictionaryId, entryId) = await SeedDictionaryAsync(ownerId, Dictionary.AccessMode.Private, returnDraft: true);
         var (admin, _) = await TeacherLogin.CreateAndLoginAsync(factory, administrator: true);
 
         var entries = await admin.GetAsync($"/api/dictionaries/{dictionaryId}/entries");

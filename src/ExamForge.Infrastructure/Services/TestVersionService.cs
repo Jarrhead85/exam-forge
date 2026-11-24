@@ -32,15 +32,9 @@ public sealed class TestVersionService(ExamForgeDbContext db, TimeProvider timeP
         var removable = existing.Where(v => !referencedIds.Contains(v.Id)).ToList();
         db.Variants.RemoveRange(removable);
 
-        var definitions = new Dictionary<Guid, QuestionDefinition>();
-        foreach (var questionVersionId in testVersion.QuestionVersionIds)
-        {
-            var json = await db.QuestionVersions.AsNoTracking()
-                .Where(v => v.Id == questionVersionId)
-                .Select(v => v.DefinitionJson)
-                .SingleAsync(ct);
-            definitions[questionVersionId] = QuestionDefinitionJson.Deserialize(json);
-        }
+        var definitions = await db.QuestionVersions.AsNoTracking()
+            .Where(version => testVersion.QuestionVersionIds.Contains(version.Id))
+            .ToDictionaryAsync(version => version.Id, version => QuestionDefinitionJson.Deserialize(version.DefinitionJson), ct);
 
         var nextNumber = existing.Count == 0 ? 1 : existing.Max(v => v.VariantNumber) + 1;
         var variants = VariantGenerator.Generate(
@@ -50,6 +44,20 @@ public sealed class TestVersionService(ExamForgeDbContext db, TimeProvider timeP
         db.Variants.AddRange(variants);
         await db.SaveChangesAsync(ct);
         return variants;
+    }
+
+    public async Task<Guid> DuplicateAsDraftAsync(TeacherActor actor, Guid versionId, CancellationToken ct)
+    {
+        var version = await LoadOwnedVersionAsync(actor, versionId, ct);
+        var source = await db.Tests.AsNoTracking().SingleAsync(test => test.Id == version.TestId, ct);
+        var name = "Копия — " + source.Title;
+        var now = timeProvider.GetUtcNow();
+        var copy = Test.Create(source.SubjectId, actor.TeacherId, name[..Math.Min(name.Length, 300)], now);
+        var draft = TestVersion.Create(copy.Id, 1, version.Title, version.QuestionVersionIds, version.MaxPoints, now);
+        db.Tests.Add(copy);
+        db.TestVersions.Add(draft);
+        await db.SaveChangesAsync(ct);
+        return copy.Id;
     }
 
     public async Task<IReadOnlyList<Variant>> ListVariantsAsync(TeacherActor actor, Guid testVersionId, CancellationToken ct)

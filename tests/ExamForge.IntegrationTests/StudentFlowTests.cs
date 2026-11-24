@@ -1,4 +1,4 @@
-﻿using System.Net;
+using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using ExamForge.Domain.Access;
@@ -632,7 +632,7 @@ public sealed class StudentFlowTests(ExamForgeWebFactory factory)
         var state = await GetJsonAsync(client, $"/api/attempts/{attemptId}/state");
         var locked = state.GetProperty("sessions")[0];
         Assert.Equal(1, locked.GetProperty("revision").GetInt32());
-        Assert.Equal("Locked", locked.GetProperty("state").GetString());
+        Assert.Equal("LockedSubmitted", locked.GetProperty("state").GetString());
     }
 
     [Fact]

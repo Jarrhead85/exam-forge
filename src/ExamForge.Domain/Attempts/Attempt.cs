@@ -20,7 +20,7 @@ public sealed class Attempt
     public string StudentNameSnapshot { get; private set; } = string.Empty;
     public string? StudentGroupSnapshot { get; private set; }
 
-    /// <summary>1–2 — обычные попытки; 3+ только при ExtraAttemptGrant (ТЗ §10.4).</summary>
+    /// <summary>Номер попытки. Сервис назначения проверяет лимит и использование дополнительного допуска.</summary>
     public int AttemptNumber { get; private set; }
     public Guid? ExtraGrantId { get; private set; }
 
@@ -56,13 +56,14 @@ public sealed class Attempt
         string studentNameSnapshot,
         string? studentGroupSnapshot,
         Guid? extraGrantId = null,
-        Guid? variantId = null)
+        Guid? variantId = null,
+        int regularAttemptLimit = 2)
     {
         Guard.Required(studentNameSnapshot, "ФИО студента", 300);
         if (attemptNumber < 1)
             throw new DomainException("Номер попытки начинается с 1.");
-        if (attemptNumber > 2 && extraGrantId is null)
-            throw new DomainException("Попытка свыше второй требует ExtraAttemptGrant (ТЗ §10.4).");
+        if (attemptNumber > regularAttemptLimit && extraGrantId is null)
+            throw new DomainException("Для дополнительной попытки требуется разрешение преподавателя.");
 
         return new Attempt
         {

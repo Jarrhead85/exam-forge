@@ -1,13 +1,12 @@
 using ExamForge.Application.StudentFlow;
 using ExamForge.Domain.Access;
-using ExamForge.Infrastructure.Persistence;
 using ExamForge.Infrastructure.Services;
 using ExamForge.Web.Authentication;
 using Microsoft.AspNetCore.Antiforgery;
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
-using Microsoft.EntityFrameworkCore;
 
 namespace ExamForge.Web.Controllers;
 
@@ -31,20 +30,20 @@ public sealed class AccessController(
     /// <summary>Вход по общей ссылке (ТЗ §5.1): ФИО+группа перед стартом; без доступа к чужой истории.</summary>
     [HttpPost("/api/access/common-link")]
     [AllowAnonymous]
-    [EnableRateLimiting("access-exchange")]
+    [EnableRateLimiting("access-link")]
     public async Task<IActionResult> CommonLink([FromBody] CommonLinkRequest request, CancellationToken ct)
     {
         var (profile, assignment) = await flow.EnterByCommonLinkAsync(
             request.Code, request.LastName, request.FirstName, request.MiddleName, request.Group, ct);
         await HttpContext.SignInStudentAsync(StudentAuth.Scheme,
-            StudentAuth.CreateCommonLinkPrincipal(assignment.Id, profile.Id, request.Group));
+            StudentAuth.CreateCommonLinkPrincipal(assignment.Id, profile.Id, assignment.CommonLinkCode!, request.Group));
         return Ok(new ExchangeResponse(assignment.Id, profile.Id));
     }
 
     /// <summary>Вход постоянного аккаунта студента (ТЗ §5.3).</summary>
     [HttpPost("/api/access/login")]
     [AllowAnonymous]
-    [EnableRateLimiting("access-exchange")]
+    [EnableRateLimiting("access-account")]
     public async Task<IActionResult> Login([FromBody] StudentLoginRequest request, CancellationToken ct)
     {
         var account = await flow.ValidateStudentLoginAsync(request.Login?.Trim() ?? "", request.Password ?? "", ct);
@@ -52,6 +51,15 @@ public sealed class AccessController(
             return UnauthorizedProblem("Неверный логин или пароль.");
         await HttpContext.SignInStudentAsync(StudentAuth.Scheme, StudentAuth.CreateAccountPrincipal(account));
         return Ok(new { account.Login });
+    }
+
+    [HttpPost("/api/access/logout")]
+    [Authorize(AuthenticationSchemes = StudentAuth.Scheme)]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> Logout()
+    {
+        await HttpContext.SignOutAsync(StudentAuth.Scheme);
+        return NoContent();
     }
 
     private IActionResult UnauthorizedProblem(string message) =>
@@ -82,9 +90,8 @@ public sealed class AccessController(
 [ApiController]
 [Authorize(AuthenticationSchemes = StudentAuth.Scheme)]
 public sealed class StudentApiController(
-    ExamForgeDbContext db,
-    TimeProvider timeProvider,
-    Infrastructure.Services.MaterialsService materials) : ControllerBase
+    StudentFlowService flow,
+    MaterialsService materials) : ControllerBase
 {
     /// <summary>Лекции, доступные студенту: Published + grants по профилю/группе (ТЗ §14).</summary>
     [HttpGet("/api/student/materials")]
@@ -111,47 +118,7 @@ public sealed class StudentApiController(
     [HttpGet("/api/student/assignments")]
     public async Task<IActionResult> MyAssignments(CancellationToken ct)
     {
-        var identity = User.StudentIdentity()
-            ?? throw StudentFlowException.NotFound();
-        var now = timeProvider.GetUtcNow();
-
-        // Сессия кода/ссылки видит своё назначение; аккаунт — все, куда приглашён профиль (ТЗ §5.3).
-        var assignmentIds = identity.AssignmentId is { } single
-            ? new List<Guid> { single }
-            : identity.StudentProfileId is { } profileId
-                ? await db.Invitations.AsNoTracking()
-                    .Where(i => i.StudentProfileId == profileId && i.Status == Domain.Assignments.InvitationStatus.Active)
-                    .Select(i => i.AssignmentId).Distinct().ToListAsync(ct)
-                : [];
-
-        var rows = await db.Assignments.AsNoTracking()
-            .Where(a => assignmentIds.Contains(a.Id))
-            .Join(db.TestVersions.AsNoTracking(),
-                a => a.TestVersionId, v => v.Id, (a, v) => new { a, v.Title })
-            .ToListAsync(ct);
-
-        var dtos = new List<StudentAssignmentDto>();
-        foreach (var row in rows)
-        {
-            var attempts = await db.Attempts.AsNoTracking()
-                .Where(a => a.AssignmentId == row.a.Id && a.StudentProfileId == identity.StudentProfileId)
-                .ToListAsync(ct);
-            var active = attempts.FirstOrDefault(a =>
-                a.State == Domain.Attempts.AttemptState.Created || a.State == Domain.Attempts.AttemptState.InProgress);
-            // История своих результатов: баллы/процент без ключей (ТЗ §9, §12).
-            var briefs = attempts
-                .Where(a => a.State != Domain.Attempts.AttemptState.Created)
-                .OrderBy(a => a.AttemptNumber)
-                .Select(a => new StudentAttemptBriefDto(
-                    a.Id, a.AttemptNumber, a.State.ToString(),
-                    a.ScoreEarnedPoints, a.ScoreMaxPoints, a.Score?.RoundedPercent, a.CompletedAtUtc))
-                .ToList();
-            dtos.Add(new StudentAssignmentDto(
-                row.a.Id, row.Title, row.a.Mode.ToString(), row.a.OpensAtUtc, row.a.ClosesAtUtc,
-                row.a.MaxAttempts,
-                attempts.Count(a => a.State != Domain.Attempts.AttemptState.Cancelled),
-                active is not null, active?.Id, briefs));
-        }
-        return Ok(dtos);
+        var identity = User.StudentIdentity() ?? throw StudentFlowException.NotFound();
+        return Ok(await flow.ListAssignmentsAsync(identity, ct));
     }
 }

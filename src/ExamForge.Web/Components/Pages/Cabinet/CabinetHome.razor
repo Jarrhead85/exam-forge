@@ -1,4 +1,4 @@
-﻿@page "/cabinet"
+@page "/cabinet"
 @layout Layout.TeacherLayout
 @attribute [Authorize]
 @* prerender: контент обзора виден мгновенно из SSR-ответа, ещё до подключения circuit
@@ -12,94 +12,95 @@
 @inject ManualReviewService Reviews
 @inject UserManager<TeacherUser> UserManager
 @inject AuthenticationStateProvider AuthState
+@inject TimeProvider Clock
 
 <PageTitle>Обзор — Exam Forge</PageTitle>
 
-<h1>Обзор</h1>
-<p class="ef-card__meta">Актуальные действия, без декоративных KPI.</p>
+<div class="ef-page-heading">
+    <h1>Обзор</h1>
+    <a class="ef-button ef-button--primary" href="cabinet/assignments">Создать работу</a>
+</div>
 
-<section class="ef-card" aria-labelledby="howto-title">
-    <h2 id="howto-title" class="ef-card__title">Как провести работу: три шага</h2>
-    <ol class="ef-howto">
-        <li>
-            <strong>Тесты</strong> — создайте тест, соберите версию из опубликованных заданий банка,
-            опубликуйте её и сгенерируйте варианты.
-        </li>
-        <li>
-            <strong>Назначения</strong> — создайте назначение на опубликованную версию: режим
-            (контрольная/тренировка), сроки, число попыток.
-        </li>
-        <li>
-            <strong>Выдайте коды</strong> — в карточке назначения добавьте студентов и передайте каждому
-            одноразовый код лично. Студент открывает страницу «Студентам» (<span class="ef-mono">/exam</span>),
-            вводит код и проходит работу. Результаты появятся в «Проверке» и «Результатах».
-        </li>
-    </ol>
-    <p class="ef-card__meta">
-        Печать «Лист студента»/«Ключ» — для проведения на бумаге; онлайн-работа идёт по коду без распечаток.
-        Подробнее — <a href="cabinet/help">Справка преподавателя</a>.
-    </p>
-</section>
-
-@if (_assignments.Count == 0)
-{
-    <div class="ef-callout ef-callout--info">
-        <p>Назначений нет. Путь: «Тесты» → версия из банка → варианты → «Назначения» → назначение группы/студентов.</p>
-    </div>
-}
-
-@if (_pendingReview.Count > 0)
-{
-    <section class="ef-card" aria-labelledby="dash-review">
-        <h2 id="dash-review" class="ef-card__title">Ждут проверки</h2>
-        @foreach (var attempt in _pendingReview)
-        {
-            <p>
-                <a href="@($"cabinet/reviews/{attempt.AttemptId}")">@attempt.StudentName — попытка @attempt.AttemptNumber</a>
-                <span class="ef-card__meta">(@attempt.PendingCriteria критериев ожидают)</span>
-            </p>
-        }
+<div class="ef-portal-grid ef-dashboard">
+    <section class="ef-card" aria-labelledby="today-title">
+        <h2 id="today-title" class="ef-card__title">Начинаются сегодня</h2>
+        @AssignmentList(_today, "На сегодня новых работ нет.")
     </section>
-}
 
-<section class="ef-card" aria-labelledby="dash-assignments">
-    <h2 id="dash-assignments" class="ef-card__title">Назначения</h2>
-    @if (_assignments.Count > 0)
+    <section class="ef-card" aria-labelledby="active-title">
+        <h2 id="active-title" class="ef-card__title">Доступны студентам</h2>
+        @AssignmentList(_active, "Сейчас нет открытых работ.")
+    </section>
+</div>
+
+<section class="ef-card" aria-labelledby="dash-review">
+    <h2 id="dash-review" class="ef-card__title">Ждут проверки</h2>
+    @if (_pendingReview.Count == 0)
     {
-        <table class="ef-table">
-            <caption>Последние назначения</caption>
-            <thead>
-                <tr><th scope="col">Тест</th><th scope="col">Студентов</th><th scope="col">Попыток</th><th scope="col">Статус</th><th scope="col"></th></tr>
-            </thead>
-            <tbody>
-                @foreach (var a in _assignments.Take(5))
-                {
-                    <tr>
-                        <td>@a.TestTitle</td>
-                        <td>@a.StudentsInvited</td>
-                        <td>@a.AttemptsStarted / @a.MaxAttempts</td>
-                        <td>@(a.IsOpen ? "открыто" : "закрыто")</td>
-                        <td><a class="ef-button ef-button--sm ef-button--secondary" href="@($"cabinet/assignments/{a.AssignmentId}")">Открыть</a></td>
-                    </tr>
-                }
-            </tbody>
-        </table>
+        <p>Новых работ на проверку нет.</p>
+    }
+    else
+    {
+        <ul class="ef-dashboard-list">
+            @foreach (var attempt in _pendingReview)
+            {
+                <li>
+                    <a href="@($"cabinet/reviews/{attempt.AttemptId}")">@attempt.StudentName — попытка @attempt.AttemptNumber</a>
+                    <span class="ef-card__meta">Критериев на проверку: @attempt.PendingCriteria</span>
+                </li>
+            }
+        </ul>
+        <a href="cabinet/reviews">Открыть очередь проверки</a>
     }
 </section>
 
+@if (_today.Count == 0 && _active.Count == 0 && _pendingReview.Count == 0)
+{
+    <section class="ef-card" aria-labelledby="first-work-title">
+        <h2 id="first-work-title" class="ef-card__title">Подготовьте первую работу</h2>
+        <p>Добавьте задания в банк, соберите и опубликуйте тест, затем выдайте коды группе.</p>
+        <div class="ef-actions">
+            <a class="ef-button ef-button--secondary" href="cabinet/questions">Открыть банк заданий</a>
+            <a href="demo/teacher">Посмотреть пример</a>
+        </div>
+    </section>
+}
+
 @code {
-    private List<TeacherAssignmentDto> _assignments = [];
-    private readonly List<ReviewQueueItemDto> _pendingReview = [];
+    private IReadOnlyList<TeacherAssignmentDto> _today = [];
+    private IReadOnlyList<TeacherAssignmentDto> _active = [];
+    private IReadOnlyList<ReviewQueueItemDto> _pendingReview = [];
 
     protected override async Task OnInitializedAsync()
     {
         var actor = await ActorAsync();
-        _assignments = [.. await AssignmentsService.ListAssignmentsAsync(actor, CancellationToken.None)];
-        // Один батч-запрос по всем открытым назначениям вместо N вызовов очереди.
-        var openIds = _assignments.Where(a => a.IsOpen).Take(10).Select(a => a.AssignmentId).ToList();
-        var pending = await Reviews.GetOpenQueueAsync(actor, openIds, CancellationToken.None);
-        _pendingReview.AddRange(pending.Select(p => p.Item));
+        var today = Clock.GetLocalNow().Date;
+        var start = TimeZoneInfo.ConvertTimeToUtc(today, Clock.LocalTimeZone);
+        var end = TimeZoneInfo.ConvertTimeToUtc(today.AddDays(1), Clock.LocalTimeZone);
+        _today = await AssignmentsService.DashboardAssignmentsAsync(actor, start, end, CancellationToken.None);
+        _active = await AssignmentsService.DashboardAssignmentsAsync(actor, null, null, CancellationToken.None);
+        var pending = await Reviews.GetOpenQueueAsync(actor, null, CancellationToken.None);
+        _pendingReview = [.. pending.Select(item => item.Item)];
     }
+
+    private RenderFragment AssignmentList(IReadOnlyList<TeacherAssignmentDto> assignments, string empty) => @<text>
+        @if (assignments.Count == 0)
+        {
+            <p>@empty</p>
+        }
+        else
+        {
+            <ul class="ef-dashboard-list">
+                @foreach (var assignment in assignments)
+                {
+                    <li>
+                        <a href="@($"cabinet/assignments/{assignment.AssignmentId}")">@assignment.TestTitle</a>
+                        <span class="ef-card__meta">Приглашено @assignment.StudentsInvited · Попыток @assignment.AttemptsStarted</span>
+                    </li>
+                }
+            </ul>
+        }
+    </text>;
 
     private async Task<TeacherActor> ActorAsync()
     {

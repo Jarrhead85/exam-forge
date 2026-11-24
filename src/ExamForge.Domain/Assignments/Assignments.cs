@@ -132,6 +132,7 @@ public sealed class Invitation
     public Guid Id { get; private set; } = Guid.NewGuid();
     public Guid AssignmentId { get; private set; }
     public Guid? StudentProfileId { get; private set; }
+    public string? GroupNameSnapshot { get; private set; }
 
     /// <summary>HMAC-SHA256 нормализованного кода; уникален.</summary>
     public string CodeHash { get; private set; } = string.Empty;
@@ -149,7 +150,7 @@ public sealed class Invitation
 
     public static Invitation Create(
         Guid assignmentId, Guid? studentProfileId, string codeHash,
-        DateTimeOffset? expiresAtUtc, Guid teacherId, DateTimeOffset nowUtc)
+        DateTimeOffset? expiresAtUtc, Guid teacherId, DateTimeOffset nowUtc, string? groupName = null)
     {
         if (codeHash.Length != 64)
             throw new DomainException("Ожидается HMAC-SHA256 в hex (64 символа).");
@@ -157,6 +158,7 @@ public sealed class Invitation
         {
             AssignmentId = assignmentId,
             StudentProfileId = studentProfileId,
+            GroupNameSnapshot = string.IsNullOrWhiteSpace(groupName) ? null : Guard.Required(groupName, "Группа", 200),
             CodeHash = codeHash,
             ExpiresAtUtc = expiresAtUtc,
             CreatedByTeacherId = teacherId,

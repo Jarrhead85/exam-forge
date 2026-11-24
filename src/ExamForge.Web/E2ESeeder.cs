@@ -97,24 +97,41 @@ internal static class E2ESeeder
             testVersion.Id, AssignmentMode.Assessment, FeedbackPolicy.ScoresOnly,
             now.AddHours(-1), null, 2, 120, null,
             noBacktracking: true, allowCommonLink: false, teacher.Id, now);
+        var commonLinkCode = InvitationCode.Normalize(InvitationCode.Generate());
+        assignment.EnableCommonLink(commonLinkCode, now);
         db.Assignments.Add(assignment);
 
-        var student = StudentProfile.Create("E2eova", "Student", null, now, teacher.Id);
-        db.StudentProfiles.Add(student);
-        await db.SaveChangesAsync();
-
-        var code = InvitationCode.Generate();
-        var invitation = Invitation.Create(
-            assignment.Id, student.Id, hasher.ComputeHash(InvitationCode.Normalize(code)),
-            null, teacher.Id, now);
-        db.Invitations.Add(invitation);
+        var codes = new List<string>();
+        var accountLogin = "student_" + assignment.Id.ToString("N")[..12];
+        var accountPassword = InvitationCode.Generate().Replace("-", "", StringComparison.Ordinal);
+        foreach (var name in new[] { "Мария", "Алексей", "Дарья" })
+        {
+            var student = StudentProfile.Create("Тестов", name, null, now, teacher.Id);
+            db.StudentProfiles.Add(student);
+            if (name == "Дарья")
+            {
+                var passwordHasher = new PasswordHasher<StudentAccount>();
+                db.StudentAccounts.Add(StudentAccount.Create(student.Id, accountLogin,
+                    passwordHasher.HashPassword(null!, accountPassword), teacher.Id, now));
+            }
+            var code = InvitationCode.Generate();
+            db.Invitations.Add(Invitation.Create(assignment.Id, student.Id,
+                hasher.ComputeHash(InvitationCode.Normalize(code)), null, teacher.Id, now));
+            codes.Add(code);
+        }
         await db.SaveChangesAsync();
 
         var artifact = new
         {
             teacherLogin = login,
             teacherPassword = password,
-            invitationCode = code,
+            invitationCode = codes[0],
+            revisitCode = codes[1],
+            offlineCode = codes[2],
+            accountLogin,
+            accountPassword,
+            commonLinkCode,
+            assignmentId = assignment.Id,
             assignmentTitle = test.Title,
             testTitle = test.Title,
             subjectName = subject.Name,

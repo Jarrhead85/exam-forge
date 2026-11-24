@@ -1,4 +1,4 @@
-﻿using ExamForge.Application.StudentFlow;
+using ExamForge.Application.StudentFlow;
 using ExamForge.Application.TeacherFlow;
 using ExamForge.Domain.Access;
 using ExamForge.Domain.Assignments;
@@ -17,7 +17,8 @@ namespace ExamForge.Infrastructure.Services;
 public sealed class TeacherAssignmentsService(
     ExamForgeDbContext db,
     TimeProvider timeProvider,
-    InvitationCodeHasher hasher)
+    InvitationCodeHasher hasher,
+    GroupService groups)
 {
     private DateTimeOffset Now => timeProvider.GetUtcNow();
 
@@ -26,6 +27,17 @@ public sealed class TeacherAssignmentsService(
         var version = await db.TestVersions.AsNoTracking()
             .SingleOrDefaultAsync(v => v.Id == request.TestVersionId, ct)
             ?? throw TeacherFlowErrors.NotFound("Версия теста не найдена.");
+
+        if (version.PublishedAtUtc is null)
+            throw TeacherFlowErrors.Conflict("test_not_published", "Опубликуйте версию теста перед назначением.");
+        if (request.PerQuestionTimeLimitSeconds is null && request.AttemptTotalTimeLimitSeconds is null &&
+            request.ClosesAtUtc is null &&
+            await db.QuestionVersions.AnyAsync(question => version.QuestionVersionIds.Contains(question.Id) &&
+                question.ProposedTimeLimitSeconds == null, ct))
+        {
+            throw TeacherFlowErrors.Conflict("time_limit_required",
+                "У некоторых вопросов нет лимита. Укажите общее время, время на вопрос или срок закрытия работы.");
+        }
 
         var mode = ParseEnum<AssignmentMode>(request.Mode, "Режим назначения");
         var assignment = Assignment.Create(
@@ -45,22 +57,38 @@ public sealed class TeacherAssignmentsService(
         return assignment;
     }
 
-    public async Task<IReadOnlyList<TeacherAssignmentDto>> ListAssignmentsAsync(TeacherActor actor, CancellationToken ct)
-    {
-        var query = db.Assignments.AsNoTracking().AsQueryable();
-        if (!actor.IsAdministrator)
-            query = query.Where(a => a.CreatedByTeacherId == actor.TeacherId);
+    public Task<IReadOnlyList<TeacherAssignmentDto>> ListAssignmentsAsync(TeacherActor actor, CancellationToken ct)
+        => ListAssignmentsAsync(actor, db.Assignments.AsNoTracking(), null, ct);
 
-        var rows = await query
-            .Join(db.TestVersions.AsNoTracking(), a => a.TestVersionId, v => v.Id, (a, v) => new { a, v.Title })
-            .OrderByDescending(r => r.a.CreatedAtUtc)
-            .ToListAsync(ct);
+    public Task<IReadOnlyList<TeacherAssignmentDto>> DashboardAssignmentsAsync(
+        TeacherActor actor, DateTimeOffset? startUtc, DateTimeOffset? endUtc, CancellationToken ct)
+    {
+        var now = Now;
+        var query = db.Assignments.AsNoTracking();
+        query = startUtc is { } start && endUtc is { } end
+            ? query.Where(assignment => assignment.OpensAtUtc >= start && assignment.OpensAtUtc < end)
+            : query.Where(assignment => assignment.OpensAtUtc <= now &&
+                (assignment.ClosesAtUtc == null || assignment.ClosesAtUtc > now));
+        return ListAssignmentsAsync(actor, query, 5, ct);
+    }
+
+    private async Task<IReadOnlyList<TeacherAssignmentDto>> ListAssignmentsAsync(
+        TeacherActor actor, IQueryable<Assignment> query, int? limit, CancellationToken ct)
+    {
+        if (!actor.IsAdministrator)
+            query = query.Where(assignment => assignment.CreatedByTeacherId == actor.TeacherId);
+
+        var list = query.Join(db.TestVersions.AsNoTracking(), assignment => assignment.TestVersionId,
+            version => version.Id, (a, v) => new { a, v.Title }).OrderByDescending(row => row.a.CreatedAtUtc).AsQueryable();
+        if (limit is { } maximum)
+            list = list.Take(maximum);
+        var rows = await list.ToListAsync(ct);
 
         var assignmentIds = rows.Select(r => r.a.Id).ToList();
         var invitedCounts = await db.Invitations.AsNoTracking()
-            .Where(i => assignmentIds.Contains(i.AssignmentId))
+            .Where(i => assignmentIds.Contains(i.AssignmentId) && i.StudentProfileId != null && i.Status == InvitationStatus.Active)
             .GroupBy(i => i.AssignmentId)
-            .Select(g => new { AssignmentId = g.Key, Count = g.Count() })
+            .Select(g => new { AssignmentId = g.Key, Count = g.Select(i => i.StudentProfileId).Distinct().Count() })
             .ToDictionaryAsync(x => x.AssignmentId, x => x.Count, ct);
         var startedCounts = await db.Attempts.AsNoTracking()
             .Where(a => assignmentIds.Contains(a.AssignmentId))
@@ -77,6 +105,14 @@ public sealed class TeacherAssignmentsService(
                 row.a.IsOpenAt(Now)));
         }
         return result;
+    }
+
+    public async Task<CreateAssignmentRequest> GetTemplateAsync(TeacherActor actor, Guid assignmentId, CancellationToken ct)
+    {
+        var assignment = await LoadOwnedAsync(actor, assignmentId, ct);
+        return new CreateAssignmentRequest(assignment.TestVersionId, assignment.Mode.ToString(), Now, null,
+            assignment.MaxAttempts, assignment.PerQuestionTimeLimitSeconds, assignment.AttemptTotalTimeLimitSeconds,
+            NoBacktracking: true);
     }
 
     public async Task<TeacherAssignmentDetailsDto> GetAssignmentAsync(TeacherActor actor, Guid assignmentId, CancellationToken ct)
@@ -102,21 +138,24 @@ public sealed class TeacherAssignmentsService(
 
         var summary = new TeacherAssignmentDto(
             assignmentId, title, assignment.Mode.ToString(), assignment.OpensAtUtc, assignment.ClosesAtUtc,
-            assignment.MaxAttempts, invitations.Count, attempts.Count, assignment.IsOpenAt(Now));
+            assignment.MaxAttempts,
+            invitations.Where(i => i.Status == InvitationStatus.Active && i.StudentProfileId != null)
+                .Select(i => i.StudentProfileId).Distinct().Count(),
+            attempts.Count, assignment.IsOpenAt(Now));
 
         var invitationDtos = invitations.Select(i => new InvitationDto(
             i.Id, i.StudentProfileId!.Value,
             students.TryGetValue(i.StudentProfileId!.Value, out var p) ? p.LastName + " " + p.FirstName : "?",
-            null, i.CreatedAtUtc, i.Status.ToString(), i.ReplacedByInvitationId, null)).ToList();
+            i.GroupNameSnapshot, i.CreatedAtUtc, i.Status.ToString(), i.ReplacedByInvitationId, null)).ToList();
 
         // Лучшая — только среди Finalized eligible (ТЗ §10.4); tie-break — ранняя завершённая (D-08).
-        var best = AttemptRules.SelectBest(attempts);
+        var best = AttemptRules.BestAttemptIdsByStudent(attempts);
 
         var attemptDtos = attempts.Select(a => new TeacherAttemptDto(
             a.Id, a.StudentNameSnapshot, a.StudentGroupSnapshot, a.AttemptNumber, a.State.ToString(),
             a.StartedAtUtc, a.CompletedAtUtc,
             a.Score?.EarnedPoints, a.Score?.MaxPoints, a.Score?.RoundedPercent,
-            best?.Id == a.Id)).ToList();
+            best.Contains(a.Id))).ToList();
 
         return new TeacherAssignmentDetailsDto(summary, invitationDtos, attemptDtos);
     }
@@ -129,25 +168,25 @@ public sealed class TeacherAssignmentsService(
         var now = Now;
         var student = StudentProfile.Create(request.LastName, request.FirstName, request.MiddleName, now, actor.TeacherId);
         db.StudentProfiles.Add(student);
-        await db.SaveChangesAsync(ct);
-        return await CreateInvitationCoreAsync(assignment, student, now, ct);
+        return await CreateInvitationCoreAsync(assignment, student, now, ct, request.GroupName);
     }
 
     public async Task<InvitationDto> CreateInvitationForStudentAsync(
         TeacherActor actor, Guid assignmentId, Guid studentProfileId, CancellationToken ct)
     {
         var assignment = await LoadOwnedAsync(actor, assignmentId, ct);
+        await groups.EnsureStudentAccessAsync(actor, studentProfileId, ct);
         var student = await db.StudentProfiles.FindAsync([studentProfileId], ct)
             ?? throw TeacherFlowErrors.NotFound("Студент не найден.");
         return await CreateInvitationCoreAsync(assignment, student, Now, ct);
     }
 
     private async Task<InvitationDto> CreateInvitationCoreAsync(
-        Assignment assignment, StudentProfile student, DateTimeOffset nowUtc, CancellationToken ct)
+        Assignment assignment, StudentProfile student, DateTimeOffset nowUtc, CancellationToken ct, string? groupName = null)
     {
         var code = InvitationCode.Generate();
         var invitation = Invitation.Create(
-            assignment.Id, student.Id, hasher.ComputeHash(InvitationCode.Normalize(code)), null, assignment.CreatedByTeacherId, nowUtc);
+            assignment.Id, student.Id, hasher.ComputeHash(InvitationCode.Normalize(code)), null, assignment.CreatedByTeacherId, nowUtc, groupName);
         db.Invitations.Add(invitation);
         await db.SaveChangesAsync(ct);
         return ToDto(invitation, student, code);
@@ -167,7 +206,7 @@ public sealed class TeacherAssignmentsService(
     public async Task<(Invitation NewInvitation, StudentProfile Student, string OneTimeCode)> ReissueInvitationAsync(
         TeacherActor actor, Guid invitationId, CancellationToken ct)
     {
-        var old = await db.Invitations.AsNoTracking()
+        var old = await db.Invitations
             .SingleOrDefaultAsync(i => i.Id == invitationId, ct)
             ?? throw TeacherFlowErrors.NotFound("Приглашение не найдено.");
         await LoadOwnedAsync(actor, old.AssignmentId, ct);
@@ -177,12 +216,9 @@ public sealed class TeacherAssignmentsService(
         var code = InvitationCode.Generate();
         var replacement = Invitation.Create(
             old.AssignmentId, old.StudentProfileId, hasher.ComputeHash(InvitationCode.Normalize(code)),
-            old.ExpiresAtUtc, actor.TeacherId, Now);
+            old.ExpiresAtUtc, actor.TeacherId, Now, old.GroupNameSnapshot);
         db.Invitations.Add(replacement);
-        await db.SaveChangesAsync(ct);
-
-        var oldTracked = await db.Invitations.SingleAsync(i => i.Id == invitationId, ct);
-        oldTracked.ReplaceWith(replacement, Now);
+        old.ReplaceWith(replacement, Now);
         await db.SaveChangesAsync(ct);
         return (replacement, student, code);
     }
@@ -190,7 +226,8 @@ public sealed class TeacherAssignmentsService(
     public async Task<ExtraAttemptGrant> CreateExtraGrantAsync(
         TeacherActor actor, Guid assignmentId, ExtraGrantRequest request, CancellationToken ct)
     {
-        var assignment = await LoadOwnedAsync(actor, assignmentId, ct);
+        await LoadOwnedAsync(actor, assignmentId, ct);
+        await groups.EnsureStudentAccessAsync(actor, request.StudentProfileId, ct);
         var grant = ExtraAttemptGrant.Create(assignmentId, request.StudentProfileId, request.Reason, actor.TeacherId, Now);
         db.ExtraAttemptGrants.Add(grant);
         await db.SaveChangesAsync(ct);
@@ -252,6 +289,7 @@ public sealed class TeacherAssignmentsService(
         TeacherActor actor, Guid assignmentId, Guid studentProfileId, CancellationToken ct)
     {
         await LoadOwnedAsync(actor, assignmentId, ct);
+        await groups.EnsureStudentAccessAsync(actor, studentProfileId, ct);
         var student = await db.StudentProfiles.FindAsync([studentProfileId], ct)
             ?? throw TeacherFlowErrors.NotFound("Студент не найден.");
 
@@ -270,13 +308,7 @@ public sealed class TeacherAssignmentsService(
         TeacherActor actor, Guid assignmentId, Guid studentAccountId, CancellationToken ct)
     {
         await LoadOwnedAsync(actor, assignmentId, ct);
-        var account = await db.StudentAccounts.FindAsync([studentAccountId], ct)
-            ?? throw TeacherFlowErrors.NotFound("Аккаунт не найден.");
-        var oneTimePassword = Domain.Access.InvitationCode.Generate().Replace("-", "", StringComparison.Ordinal);
-        var hasher = new Microsoft.AspNetCore.Identity.PasswordHasher<Domain.People.StudentAccount>();
-        account.ChangePassword(hasher.HashPassword(null!, oneTimePassword), Now);
-        await db.SaveChangesAsync(ct);
-        return oneTimePassword;
+        return await groups.ResetStudentAccountPasswordAsync(actor, studentAccountId, ct);
     }
 
     // ---------- Вспомогательное ----------
@@ -292,7 +324,7 @@ public sealed class TeacherAssignmentsService(
     private static InvitationDto ToDto(Invitation invitation, StudentProfile student, string? oneTimeCode) => new(
         invitation.Id, student.Id,
         student.MiddleName is null ? $"{student.LastName} {student.FirstName}" : $"{student.LastName} {student.FirstName} {student.MiddleName}",
-        null, invitation.CreatedAtUtc, invitation.Status.ToString(), invitation.ReplacedByInvitationId, oneTimeCode);
+        invitation.GroupNameSnapshot, invitation.CreatedAtUtc, invitation.Status.ToString(), invitation.ReplacedByInvitationId, oneTimeCode);
 
     private static T ParseEnum<T>(string value, string name) where T : struct, Enum
         => Enum.TryParse<T>(value, ignoreCase: true, out var parsed) && Enum.IsDefined(parsed)

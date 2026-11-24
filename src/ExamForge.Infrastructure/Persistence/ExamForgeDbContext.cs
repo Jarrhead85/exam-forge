@@ -362,6 +362,7 @@ public sealed class InvitationConfiguration : IEntityTypeConfiguration<Invitatio
         builder.HasKey(i => i.Id);
         // Хеш вместо кода; уникальный индекс — быстрый поиск при обмене (ADR-002).
         builder.HasIndex(i => i.CodeHash).IsUnique();
+        builder.Property(i => i.GroupNameSnapshot).HasMaxLength(200);
         builder.Property(i => i.CodeHash).HasMaxLength(64).IsFixedLength();
         builder.Property(i => i.Status).HasConversion<int>();
         builder.HasIndex(i => new { i.AssignmentId, i.StudentProfileId });

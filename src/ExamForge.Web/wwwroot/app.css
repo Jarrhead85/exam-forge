@@ -100,7 +100,7 @@ a:hover { color: var(--ef-accent-hover); }
 
 .ef-app {
     display: grid;
-    grid-template-columns: 224px 1fr;
+    grid-template-columns: 224px minmax(0, 1fr);
     min-height: 100vh;
 }
 
@@ -158,39 +158,6 @@ a:hover { color: var(--ef-accent-hover); }
 .ef-howto li { padding-left: var(--ef-space-2); }
 
 /* Индикатор подключения Blazor (кабинет/WASM): виден до готовности содержимого. */
-.ef-boot {
-    position: fixed;
-    right: var(--ef-space-4);
-    bottom: var(--ef-space-4);
-    display: flex;
-    align-items: center;
-    gap: var(--ef-space-2);
-    padding: var(--ef-space-2) var(--ef-space-4);
-    background: var(--ef-surface);
-    border: 1px solid var(--ef-border);
-    border-radius: var(--ef-radius-sm);
-    color: var(--ef-muted);
-    font-size: 13px;
-    box-shadow: 0 2px 8px rgb(0 0 0 / 12%);
-    z-index: 60;
-}
-.ef-boot__dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--ef-accent);
-    animation: ef-boot-pulse 1.2s ease-in-out infinite;
-}
-@keyframes ef-boot-pulse { 50% { opacity: 0.35; } }
-.ef-boot--failed { border-color: var(--ef-danger); color: var(--ef-danger); }
-.ef-boot--failed .ef-boot__dot { animation: none; background: var(--ef-danger); }
-@media (prefers-reduced-motion: reduce) {
-    .ef-boot__dot { animation: none; }
-}
-@media print {
-    .ef-boot { display: none; }
-}
-
 /* Видимый фокус с клавиатуры на всех интерактивных элементах (доступность, UI_KIT §5.2).
    Один единый стиль: 3px focus-цвет — без вторых конкурирующих outline. */
 :focus-visible {
@@ -209,23 +176,51 @@ a:hover { color: var(--ef-accent-hover); }
 
 .ef-app-main {
     width: 100%;
+    min-width: 0;
     max-width: 1280px;
     margin: 0 auto;
     padding: var(--ef-space-6) var(--ef-space-6) var(--ef-space-7);
 }
 
+.ef-rail-desktop {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: var(--ef-space-5);
+}
+
+.ef-rail-mobile { display: none; }
+
 @media (max-width: 1023px) {
-    .ef-app { grid-template-columns: 1fr; }
+    .ef-app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
     .ef-rail {
         flex-direction: row;
         align-items: center;
         flex-wrap: wrap;
+        gap: var(--ef-space-3);
+        padding: var(--ef-space-3) var(--ef-space-4);
         border-right: none;
         border-bottom: 1px solid var(--ef-border);
     }
-    .ef-rail-nav { flex-direction: row; flex-wrap: wrap; }
-    .ef-rail-group { display: none; }
-    .ef-rail-footer { margin: 0 0 0 auto; flex-direction: row; align-items: center; }
+    .ef-rail-desktop { display: none; }
+    .ef-rail-mobile {
+        display: block;
+        flex: 1 1 100%;
+    }
+    .ef-rail-mobile summary {
+        min-height: 44px;
+        padding: var(--ef-space-2) var(--ef-space-3);
+        color: var(--ef-accent);
+        cursor: pointer;
+        border: 1px solid var(--ef-border);
+        border-radius: var(--ef-radius-sm);
+    }
+    .ef-rail-mobile .ef-rail-nav { margin-top: var(--ef-space-3); }
+    .ef-rail-mobile .ef-rail-footer {
+        justify-content: flex-end;
+        flex-direction: row;
+        margin-top: var(--ef-space-3);
+    }
     .ef-app-main { padding: var(--ef-space-5) var(--ef-space-4); }
 }
 
@@ -262,9 +257,9 @@ a:hover { color: var(--ef-accent-hover); }
 
 .ef-button--primary {
     background: var(--ef-accent);
-    color: #ffffff;
+    color: var(--ef-on-accent);
 }
-.ef-button--primary:hover { background: var(--ef-accent-hover); color: #ffffff; }
+.ef-button--primary:hover { background: var(--ef-accent-hover); color: var(--ef-on-accent); }
 
 .ef-button--secondary {
     background: var(--ef-surface);
@@ -362,6 +357,7 @@ a:hover { color: var(--ef-accent-hover); }
 
 .ef-form {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: var(--ef-space-4);
     max-width: 480px;
 }
@@ -412,7 +408,12 @@ a:hover { color: var(--ef-accent-hover); }
 .ef-summary-toggle::-webkit-details-marker { color: var(--ef-muted); }
 details[open] > .ef-summary-toggle { margin-bottom: var(--ef-space-3); }
 
-.ef-field { display: grid; gap: var(--ef-space-1); }
+.ef-field {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    min-inline-size: 0;
+    gap: var(--ef-space-1);
+}
 
 .ef-field label {
     font-size: 14px;
@@ -420,6 +421,8 @@ details[open] > .ef-summary-toggle { margin-bottom: var(--ef-space-3); }
 }
 
 .ef-field input, .ef-field select, .ef-field textarea {
+    min-inline-size: 0;
+    max-inline-size: 100%;
     min-height: 44px;
     padding: var(--ef-space-2) var(--ef-space-3);
     border: 1px solid var(--ef-muted);
@@ -551,11 +554,12 @@ details[open] > .ef-summary-toggle { margin-bottom: var(--ef-space-3); }
     background: var(--ef-surface);
 }
 
-.ef-exam-header__subject {
-    margin-left: auto;
-    color: var(--ef-muted);
-    font-size: 13px;
-}
+.ef-exam-header .ef-theme-toggle { margin-inline-start: auto; }
+.ef-exam-header { flex-wrap: wrap; gap: var(--ef-space-3); }
+.ef-exam-main, .ef-exam-question, .ef-exam-title { min-inline-size: 0; overflow-wrap: anywhere; }
+.ef-exam-title { flex-basis: 100%; font-weight: 600; }
+.ef-exam-statusbar .ef-badge { font-variant-numeric: tabular-nums; }
+.ef-exam-editor { margin: 0; padding: 0; border: 0; min-inline-size: 0; }
 
 .ef-exam-main {
     max-width: 820px;
@@ -580,6 +584,7 @@ details[open] > .ef-summary-toggle { margin-bottom: var(--ef-space-3); }
 
 .ef-exam-actions {
     display: flex;
+    flex-wrap: wrap;
     gap: var(--ef-space-3);
     margin-top: var(--ef-space-5);
     justify-content: flex-end;
@@ -593,10 +598,7 @@ details[open] > .ef-summary-toggle { margin-bottom: var(--ef-space-3); }
     border-color: var(--ef-warning);
 }
 
-.ef-exam-editor.is-disabled {
-    pointer-events: none;
-    opacity: .7;
-}
+.ef-exam-editor:disabled { opacity: .75; }
 
 .ef-choice-list {
     border: none;
@@ -798,16 +800,13 @@ details[open] > .ef-summary-toggle { margin-bottom: var(--ef-space-3); }
 
 /* ---------- Диалог подтверждения (UI Kit §5.12: focus trap-подобное поведение, Esc безопасен) ---------- */
 
-.ef-dialog-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(23, 28, 32, .45);
-    display: grid;
-    place-items: center;
-    z-index: 50;
-}
+dialog.ef-dialog {
+    max-inline-size: min(440px, calc(100vw - 2rem));
+    max-block-size: calc(100dvh - 2rem);
+    overflow: auto;
+    overscroll-behavior: contain;
+    color: var(--ef-ink);
 
-.ef-dialog {
     background: var(--ef-surface);
     border: 1px solid var(--ef-border);
     border-radius: var(--ef-radius-lg);
@@ -821,7 +820,7 @@ details[open] > .ef-summary-toggle { margin-bottom: var(--ef-space-3); }
 
 .ef-portal-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
     gap: var(--ef-space-5);
 }
 
@@ -856,3 +855,90 @@ details[open] > .ef-summary-toggle { margin-bottom: var(--ef-space-3); }
     .ef-portal-header, .ef-portal-footer, .ef-rail, .ef-theme-toggle { display: none !important; }
     body { background: #ffffff; color: #000000; }
 }
+
+dialog.ef-dialog::backdrop {
+    background: rgb(0 0 0 / .48);
+    overflow: hidden;
+    overscroll-behavior: contain;
+}
+
+.ef-entry-card { max-inline-size: 34rem; margin-inline: auto; }
+.ef-entry-switcher,
+.ef-page-heading {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--ef-space-3);
+}
+.ef-entry-switcher { margin-block: var(--ef-space-4); }
+.ef-entry-switcher a {
+    display: inline-flex;
+    align-items: center;
+    min-block-size: 44px;
+    padding-inline: var(--ef-space-3);
+}
+.ef-entry-switcher [aria-current="page"] {
+    background: var(--ef-soft);
+    border-radius: var(--ef-radius-sm);
+    font-weight: 600;
+}
+.ef-page-heading { justify-content: space-between; }
+.ef-page-heading h1, .ef-page-heading h2 { margin-block: 0; }
+.ef-exam-rules { padding-inline-start: var(--ef-space-5); }
+.ef-table-scroll {
+    max-inline-size: 100%;
+    overflow-x: auto;
+}
+.ef-table-scroll .ef-table { display: table; }
+.ef-sr-only {
+    position: absolute;
+    inline-size: 1px;
+    block-size: 1px;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+}
+
+.ef-roster-import { margin-block: var(--ef-space-4); }
+.ef-roster-import summary { cursor: pointer; }
+.ef-roster-preview { max-block-size: 19rem; overflow-y: auto; }
+.ef-roster-row { display: flex; gap: var(--ef-space-3); align-items: center; min-block-size: 44px; }
+
+.ef-hero--home {
+    display: grid;
+    max-inline-size: none;
+    grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+    align-items: center;
+    gap: var(--ef-space-6);
+}
+.ef-hero--home h1 { max-inline-size: 20ch; text-wrap: balance; }
+.ef-hero--home h1:focus { outline: none; }
+.ef-hero--home p { max-inline-size: 58ch; }
+.ef-hero-example { margin-block: 0; }
+.ef-sample-options { margin-block: var(--ef-space-4) 0; padding: 0; list-style-position: inside; }
+.ef-sample-options li {
+    margin-block: var(--ef-space-2);
+    padding: var(--ef-space-2) var(--ef-space-3);
+    border: 1px solid var(--ef-border);
+    border-radius: var(--ef-radius-sm);
+    background: var(--ef-paper);
+}
+
+@media (max-width: 740px) {
+    .ef-hero--home { grid-template-columns: minmax(0, 1fr); }
+}
+
+.ef-dashboard { margin-block: var(--ef-space-5); }
+.ef-dashboard-list { margin: 0 0 var(--ef-space-3); padding: 0; list-style: none; }
+.ef-dashboard-list li { display: grid; gap: var(--ef-space-1); padding-block: var(--ef-space-2); }
+
+@media (max-width: 639px) {
+    .ef-portal-header { flex-wrap: wrap; column-gap: var(--ef-space-3); }
+    .ef-portal-nav { flex-wrap: wrap; gap: var(--ef-space-2); margin-inline-start: 0; }
+    .ef-portal-main { padding-inline: var(--ef-space-4); }
+}
+
+.ef-practice-feedback { padding-inline-start: var(--ef-space-5); }
+.ef-practice-feedback li { margin-block: var(--ef-space-3); }
+.ef-practice-feedback span { display: block; color: var(--ef-muted); }

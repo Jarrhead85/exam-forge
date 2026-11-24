@@ -1,4 +1,4 @@
-﻿@page "/cabinet/assignments/{assignmentId:guid}"
+@page "/cabinet/assignments/{assignmentId:guid}"
 @layout Layout.TeacherLayout
 @attribute [Authorize]
 @* prerender: содержимое видно мгновенно; формы защищены submit-блокировщиком в App.razor *@
@@ -10,6 +10,7 @@
 @inject TeacherAssignmentsService AssignmentsService
 @inject PaperWorkService PaperWorks
 @inject GroupService GroupService
+@inject GroupInvitationService GroupInvitations
 @inject UserManager<TeacherUser> UserManager
 @inject AuthenticationStateProvider AuthState
 @inject NavigationManager Navigation
@@ -23,21 +24,24 @@
 else
 {
     var a = _details.Assignment;
-    <h1>@a.TestTitle</h1>
+    <div class="ef-page-heading">
+        <h1>@a.TestTitle</h1>
+        <div class="ef-actions">
+            <a class="ef-button ef-button--secondary" href="@($"cabinet/preview/assignment/{AssignmentId}")">Пройти пробно</a>
+            <a class="ef-button ef-button--quiet" href="@($"cabinet/results?assignment={AssignmentId}")">Ведомость</a>
+            <a class="ef-button ef-button--quiet" href="@($"cabinet/assignments?template={AssignmentId}")">Повторить работу</a>
+        </div>
+    </div>
     <p class="ef-card__meta">
         @(a.Mode == "Assessment" ? "Контрольная" : "Тренировка") · попыток: @a.MaxAttempts ·
-        @(a.IsOpen ? "открыто" : "закрыто")
-        @(a.ClosesAtUtc is { } closes ? $"до {closes.LocalDateTime:dd.MM.yyyy HH:mm}" : "")
+        @(a.IsOpen ? "Открыто" : "Закрыто")
+        @(a.ClosesAtUtc is { } closes ? $"до {closes.ToLocalTime():dd.MM.yyyy HH:mm (zzz)}" : "")
     </p>
-
-    <div class="ef-callout ef-callout--info">
-        <p>
-            <strong>Как выдать работу:</strong> 1) добавьте студента ниже — получите одноразовый код;
-            2) передайте код лично (повторно он не показывается); 3) студент открывает страницу
-            «Студентам» (<span class="ef-mono">/exam</span>), вводит код и проходит работу.
-            Уже добавленному студенту код перевыпускается кнопкой «Перевыпустить».
-        </p>
-    </div>
+    <nav aria-label="На странице" class="ef-actions">
+        <a href="#students-title">Доступ</a>
+        <a href="#attempts-title">Ход работы</a>
+        <a href="#paper-title">Бумажные работы</a>
+    </nav>
 
     @if (_error is not null)
     {
@@ -46,6 +50,52 @@ else
 
     <section class="ef-card" aria-labelledby="students-title">
         <h2 id="students-title" class="ef-card__title">Студенты и коды</h2>
+
+        @if (_groups.Count > 0)
+        {
+            <div class="ef-form">
+                <div class="ef-field">
+                    <label for="assignment-group">Выдать коды группе</label>
+                    <select id="assignment-group" @bind="_groupId" @bind:after="PreviewGroupAsync" disabled="@(_busy || !RendererInfo.IsInteractive)">
+                        <option value="">Выберите группу</option>
+                        @foreach (var group in _groups)
+                        {
+                            <option value="@group.GroupId">@group.Name (@group.StudentCount)</option>
+                        }
+                    </select>
+                </div>
+                @if (_groupId is not null)
+                {
+                    <details>
+                        <summary>Предпросмотр получателей (@_groupPreview.Count)</summary>
+                        <ul class="ef-roster-preview">
+                            @foreach (var student in _groupPreview)
+                            {
+                                <li>@student.Name</li>
+                            }
+                        </ul>
+                    </details>
+                    <button class="ef-button ef-button--primary" type="button" @onclick="InviteGroupAsync"
+                            disabled="@(_busy || _groupPreview.Count == 0)">Выдать коды группе</button>
+                }
+            </div>
+        }
+        @if (_groupInvitations is { } batch)
+        {
+            <section class="ef-callout ef-callout--info" aria-label="Коды группы">
+                <p role="status">Выдано @batch.Issued.Count · Уже приглашены @batch.AlreadyInvited</p>
+                @if (batch.Issued.Count > 0)
+                {
+                    <p>Скопируйте коды сейчас и передайте каждый код его получателю.</p>
+                    <ul class="ef-roster-preview">
+                        @foreach (var invitation in batch.Issued)
+                        {
+                            <li>@invitation.StudentName · <code>@invitation.OneTimeCode</code></li>
+                        }
+                    </ul>
+                }
+            </section>
+        }
 
         @if (_oneTimeCode is not null)
         {
@@ -71,7 +121,7 @@ else
                 <label for="s-middle">Отчество (если есть)</label>
                 <InputText id="s-middle" @bind-Value="AddForm.MiddleName" autocomplete="off" />
             </div>
-            <button class="ef-button ef-button--primary" type="submit" disabled="@_busy">Добавить и выдать код</button>
+            <button class="ef-button ef-button--primary" type="submit" disabled="@(_busy || !RendererInfo.IsInteractive)">Добавить и выдать код</button>
         </EditForm>
 
         @if (_groupStudents.Count > 0)
@@ -86,7 +136,7 @@ else
                         }
                     </select>
                 </div>
-                <button class="ef-button ef-button--secondary" @onclick="InviteExistingAsync" disabled="@_busy">
+                <button class="ef-button ef-button--secondary" @onclick="InviteExistingAsync" disabled="@(_busy || !RendererInfo.IsInteractive)">
                     Выдать код
                 </button>
             </div>
@@ -143,11 +193,11 @@ else
             <div class="ef-callout ef-callout--warning">
                 <p>Ссылка для студентов: <strong class="ef-mono">/exam?link=@_commonLinkCode</strong></p>
             </div>
-            <button class="ef-button ef-button--quiet" @onclick="DisableCommonLinkAsync" disabled="@_busy">Отключить ссылку</button>
+            <button class="ef-button ef-button--quiet" @onclick="DisableCommonLinkAsync" disabled="@(_busy || !RendererInfo.IsInteractive)">Отключить ссылку</button>
         }
         else
         {
-            <button class="ef-button ef-button--secondary" @onclick="EnableCommonLinkAsync" disabled="@_busy">
+            <button class="ef-button ef-button--secondary" @onclick="EnableCommonLinkAsync" disabled="@(_busy || !RendererInfo.IsInteractive)">
                 Включить общую ссылку
             </button>
         }
@@ -176,7 +226,7 @@ else
                     }
                 </select>
             </div>
-            <button class="ef-button ef-button--secondary" @onclick="CreateAccountAsync" disabled="@_busy">
+            <button class="ef-button ef-button--secondary" @onclick="CreateAccountAsync" disabled="@(_busy || !RendererInfo.IsInteractive)">
                 Создать аккаунт
             </button>
         </div>
@@ -199,7 +249,7 @@ else
                 <label for="g-reason">Причина (обязательна)</label>
                 <InputText id="g-reason" @bind-Value="GrantForm.Reason" autocomplete="off" />
             </div>
-            <button class="ef-button ef-button--secondary" type="submit" disabled="@_busy">Выдать</button>
+            <button class="ef-button ef-button--secondary" type="submit" disabled="@(_busy || !RendererInfo.IsInteractive)">Выдать</button>
         </EditForm>
     </section>
 
@@ -240,7 +290,7 @@ else
             {
                 <div class="ef-callout ef-callout--info"><p>Бумажная работа сохранена со сканами.</p></div>
             }
-            <button class="ef-button ef-button--secondary" type="submit" disabled="@_busy">Сохранить работу</button>
+            <button class="ef-button ef-button--secondary" type="submit" disabled="@(_busy || !RendererInfo.IsInteractive)">Сохранить работу</button>
         </EditForm>
 
         @if (_paperWorks.Count > 0)
@@ -329,6 +379,10 @@ else
     private Guid? _existingStudentId;
     private readonly List<(Guid Id, string Name)> _groupStudents = [];
     private bool _busy;
+    private IReadOnlyList<GroupDto> _groups = [];
+    private Guid? _groupId;
+    private IReadOnlyList<GroupStudentDto> _groupPreview = [];
+    private GroupInvitationResult? _groupInvitations;
     private readonly List<Infrastructure.Services.PaperWorkDto> _paperWorks = [];
     private readonly List<IBrowserFile> _paperScanFiles = [];
     private PaperFormModel PaperForm { get; set; } = new();
@@ -378,6 +432,7 @@ else
             _paperWorks.Clear();
             _paperWorks.AddRange(await PaperWorks.ListAsync(actor, AssignmentId, CancellationToken.None));
             // Студенты своих групп — для выдачи кода существующему профилю (ТЗ §4).
+            _groups = await GroupService.ListAsync(actor, CancellationToken.None);
             _groupStudents.Clear();
             _groupStudents.AddRange(await GroupService.StudentsForTeacherAsync(actor, CancellationToken.None));
             _existingStudentId ??= _groupStudents.FirstOrDefault().Id;
@@ -385,6 +440,51 @@ else
         catch (Exception ex)
         {
             _error = ex.Message;
+        }
+    }
+
+    private async Task PreviewGroupAsync()
+    {
+        _groupPreview = [];
+        _groupInvitations = null;
+        if (_groupId is not { } groupId)
+            return;
+
+        _busy = true;
+        _error = null;
+        try
+        {
+            _groupPreview = await GroupService.MembersAsync(await ActorAsync(), groupId, CancellationToken.None);
+        }
+        catch (ExamForge.Application.StudentFlow.StudentFlowException ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task InviteGroupAsync()
+    {
+        if (_busy || _groupId is not { } groupId)
+            return;
+
+        _busy = true;
+        _error = null;
+        try
+        {
+            _groupInvitations = await GroupInvitations.IssueAsync(await ActorAsync(), AssignmentId, groupId, CancellationToken.None);
+            await ReloadAsync();
+        }
+        catch (ExamForge.Application.StudentFlow.StudentFlowException ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _busy = false;
         }
     }
 

@@ -1,0 +1,57 @@
+@page "/cabinet/preview/test/{VersionId:guid}"
+@page "/cabinet/preview/assignment/{AssignmentId:guid}"
+@layout Layout.TeacherLayout
+@attribute [Authorize]
+@rendermode InteractiveServer
+@using ExamForge.Application.StudentFlow
+@using ExamForge.Web.Components.Pages.Student
+@using ExamForge.Application.TeacherFlow
+@using ExamForge.Infrastructure.Identity
+@using ExamForge.Infrastructure.Services
+@using Microsoft.AspNetCore.Identity
+@inject ExamPreviewService Preview
+@inject UserManager<TeacherUser> UserManager
+@inject AuthenticationStateProvider AuthState
+
+<PageTitle>Пробное прохождение — Exam Forge</PageTitle>
+
+<p><a href="@(AssignmentId is { } id ? $"cabinet/assignments/{id}" : "cabinet/tests")">Вернуться к подготовке</a></p>
+@if (_plan is not null)
+{
+    <PreviewRunner Plan="_plan" Description="Пробные ответы видны только вам и не попадают в ведомость." />
+}
+else if (_error is not null)
+{
+    <h1>Предпросмотр недоступен</h1>
+    <p class="ef-form-error" role="alert">@_error</p>
+}
+else
+{
+    <p role="status">Загружаем вопросы…</p>
+}
+
+@code {
+    [Parameter] public Guid? VersionId { get; set; }
+    [Parameter] public Guid? AssignmentId { get; set; }
+
+    private ExamPreviewPlan? _plan;
+    private string? _error;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        try
+        {
+            var auth = await AuthState.GetAuthenticationStateAsync();
+            var user = await UserManager.GetUserAsync(auth.User)
+                ?? throw TeacherFlowErrors.NotFound("Пользователь не найден.");
+            var actor = new TeacherActor(user.Id, await UserManager.IsInRoleAsync(user, AppRoles.Administrator));
+            _plan = await Preview.LoadAsync(actor, VersionId, AssignmentId, CancellationToken.None);
+            _error = null;
+        }
+        catch (StudentFlowException ex)
+        {
+            _plan = null;
+            _error = ex.Message;
+        }
+    }
+}
