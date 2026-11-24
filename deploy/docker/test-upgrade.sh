@@ -99,9 +99,21 @@ printf 'Exam Forge upgrade fixture\n' | cmp - "$scratch/storage/upgrade-fixture.
 docker run -d --name examforge-upgrade-rollback --network examforge \
   -p 127.0.0.1:8080:8080 \
   --mount "type=bind,source=$scratch/storage,target=/data/storage" \
+  --mount type=volume,source=examforge_examforge-dataprotection,target=/root/.aspnet/DataProtection-Keys \
   -e ASPNETCORE_ENVIRONMENT=Production -e ExamForge__HttpsRedirection=false \
+  -e ExamForge__Cookies__SecurePolicy=SameAsRequest \
   -e "ConnectionStrings__Default=Host=db;Database=examforge_rollback;Username=examforge;Password=$(sed -n 's/^EXAMFORGE_DB_PASSWORD=//p' "$env_file")" \
   -e "ExamForge__InvitationHmacKey=$(sed -n 's/^EXAMFORGE_HMAC_KEY=//p' "$env_file")" \
   "$previous_image"
 wait_http http://127.0.0.1:8080/account/login
+(
+  cd e2e
+  UPGRADE_TEACHER_PASSWORD="$teacher_password" node -e '
+    const { writeFileSync } = require("node:fs");
+    writeFileSync(".state/seed.json", JSON.stringify({
+      teacherLogin: "admin1",
+      teacherPassword: process.env.UPGRADE_TEACHER_PASSWORD,
+    }));'
+  E2E_BASE_URL=http://127.0.0.1:8080 E2E_SKIP_SEED=1 npm test -- teacher-login.spec.ts
+)
 echo '::endgroup::'
