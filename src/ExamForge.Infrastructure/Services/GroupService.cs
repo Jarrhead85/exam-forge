@@ -65,6 +65,7 @@ public sealed class GroupService(ExamForgeDbContext db, TimeProvider timeProvide
     public async Task AddStudentAsync(TeacherActor actor, Guid groupId, Guid studentProfileId, CancellationToken ct)
     {
         await LoadOwnedAsync(actor, groupId, ct);
+        await EnsureStudentAccessAsync(actor, studentProfileId, ct);
         var exists = await db.GroupMemberships.AnyAsync(m => m.GroupId == groupId && m.StudentProfileId == studentProfileId, ct);
         if (exists)
             throw TeacherFlowErrors.Conflict("already_member", "Студент уже в группе.");
@@ -139,7 +140,7 @@ public sealed class GroupService(ExamForgeDbContext db, TimeProvider timeProvide
     public async Task RenameStudentAsync(
         TeacherActor actor, Guid studentProfileId, string lastName, string firstName, string? middleName, CancellationToken ct)
     {
-        await LoadOwnedStudentAsync(actor, studentProfileId, ct);
+        await EnsureStudentAccessAsync(actor, studentProfileId, ct);
         var profile = await db.StudentProfiles.SingleAsync(p => p.Id == studentProfileId, ct);
         profile.Rename(lastName, firstName, middleName);
         await db.SaveChangesAsync(ct);
@@ -152,7 +153,7 @@ public sealed class GroupService(ExamForgeDbContext db, TimeProvider timeProvide
     /// </summary>
     public async Task DeleteStudentAsync(TeacherActor actor, Guid studentProfileId, CancellationToken ct)
     {
-        await LoadOwnedStudentAsync(actor, studentProfileId, ct);
+        await EnsureStudentAccessAsync(actor, studentProfileId, ct);
         var hasAttempts = await db.Attempts.AnyAsync(a => a.StudentProfileId == studentProfileId, ct);
         if (hasAttempts)
             throw TeacherFlowErrors.Conflict("student_has_attempts", "У студента есть попытки — история не удаляется (ТЗ §21).");
@@ -174,7 +175,7 @@ public sealed class GroupService(ExamForgeDbContext db, TimeProvider timeProvide
 
     public async Task<Domain.People.StudentAccount?> AccountOfStudentAsync(TeacherActor actor, Guid studentProfileId, CancellationToken ct)
     {
-        await LoadOwnedStudentAsync(actor, studentProfileId, ct);
+        await EnsureStudentAccessAsync(actor, studentProfileId, ct);
         return await db.StudentAccounts.AsNoTracking()
             .SingleOrDefaultAsync(a => a.StudentProfileId == studentProfileId, ct);
     }
@@ -206,16 +207,15 @@ public sealed class GroupService(ExamForgeDbContext db, TimeProvider timeProvide
         await db.SaveChangesAsync(ct);
     }
 
-    /// <summary>Доступ к профилю: преподаватель с правом на любую группу профиля или администратор.</summary>
-    private async Task LoadOwnedStudentAsync(TeacherActor actor, Guid studentProfileId, CancellationToken ct)
+    internal async Task EnsureStudentAccessAsync(TeacherActor actor, Guid studentProfileId, CancellationToken ct)
     {
-        if (actor.IsAdministrator)
-            return;
-        var granted = await (from m in db.GroupMemberships.AsNoTracking()
-                             join g in db.TeacherGroupGrants.AsNoTracking() on m.GroupId equals g.GroupId
-                             where m.StudentProfileId == studentProfileId && g.TeacherId == actor.TeacherId
-                             select m.GroupId).AnyAsync(ct);
-        if (!granted)
+        var allowed = await db.StudentProfiles.AsNoTracking().AnyAsync(profile =>
+            profile.Id == studentProfileId &&
+            (actor.IsAdministrator || profile.CreatedByTeacherId == actor.TeacherId ||
+             db.GroupMemberships.Any(member => member.StudentProfileId == profile.Id &&
+                 db.TeacherGroupGrants.Any(grant => grant.GroupId == member.GroupId &&
+                     grant.TeacherId == actor.TeacherId))), ct);
+        if (!allowed)
             throw TeacherFlowErrors.NotFound("Студент не найден.");
     }
 
@@ -223,7 +223,7 @@ public sealed class GroupService(ExamForgeDbContext db, TimeProvider timeProvide
     {
         var account = await db.StudentAccounts.SingleOrDefaultAsync(a => a.Id == studentAccountId, ct)
             ?? throw TeacherFlowErrors.NotFound("Аккаунт не найден.");
-        await LoadOwnedStudentAsync(actor, account.StudentProfileId, ct);
+        await EnsureStudentAccessAsync(actor, account.StudentProfileId, ct);
         return account;
     }
 

@@ -20,15 +20,7 @@
     <a class="ef-skip-link" href="#main">Перейти к содержанию</a>
     <Routes />
     <ReconnectModal />
-    @* Индикатор загрузки Blazor: снимается boot.js при старте; автостарт стандартный —
-        ручной Blazor.start() (autostart=false) не поднимал WASM-рантайм студенческого клиента. *@
-    <div id="ef-boot" class="ef-boot" role="status" aria-live="polite">
-        <span class="ef-boot__dot" aria-hidden="true"></span>
-        <span class="ef-boot__text">Подключение к серверу…</span>
-    </div>
     <script src="@Assets["_framework/blazor.web.js"]"></script>
-    @* Внешний файл (не inline): CSP script-src 'self' блокирует inline-скрипты —
-        inline-вариант молча не выполнялся, Blazor не стартовал и формы уходили статически (400). *@
     <script src="@Assets["js/boot.js"]"></script>
 </body>
 

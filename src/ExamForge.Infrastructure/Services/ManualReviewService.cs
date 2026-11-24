@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using ExamForge.Application.StudentFlow;
 using ExamForge.Application.TeacherFlow;
 using ExamForge.Domain.Attempts;
@@ -45,7 +45,8 @@ public sealed record ReviewAttemptDto(
     string Status,
     decimal ConfirmedEarned,
     decimal MaxPoints,
-    IReadOnlyList<ReviewQuestionDto> Questions);
+    IReadOnlyList<ReviewQuestionDto> Questions,
+    Guid AssignmentId);
 
 public sealed record CriterionScoreDto(Guid QuestionSessionId, string CriterionId, decimal EarnedPoints, string Reason);
 
@@ -53,87 +54,98 @@ public sealed record CriterionScoreDto(Guid QuestionSessionId, string CriterionI
 /// Ручная проверка и переоценка (ТЗ §12): очередь по назначению, ответ+ключ+критерии для преподавателя,
 /// оценка pending-критериев с финализацией попытки, override с причиной и историей до/после (ТЗ §11).
 /// </summary>
-public sealed class ManualReviewService(ExamForgeDbContext db, TimeProvider timeProvider)
+public sealed class ManualReviewService(IDbContextFactory<ExamForgeDbContext> contextFactory, TimeProvider timeProvider)
 {
     private DateTimeOffset Now => timeProvider.GetUtcNow();
 
-    /// <summary>
-    /// Очередь проверки по нескольким назначениям одним батчем (обзор «Ждут проверки»):
-    /// три запроса на все назначения вместо N×2 — первый рендер обзора не платит за N+1.
-    /// </summary>
     public async Task<IReadOnlyList<(Guid AssignmentId, ReviewQueueItemDto Item)>> GetOpenQueueAsync(
-        TeacherActor actor, IReadOnlyList<Guid> assignmentIds, CancellationToken ct)
+        TeacherActor actor, IReadOnlyList<Guid>? assignmentIds, CancellationToken ct)
     {
-        if (assignmentIds.Count == 0)
+        if (assignmentIds is { Count: 0 })
             return [];
 
-        var ownedIds = await db.Assignments.AsNoTracking()
-            .Where(a => assignmentIds.Contains(a.Id)
-                        && (actor.IsAdministrator || a.CreatedByTeacherId == actor.TeacherId))
-            .Select(a => a.Id)
-            .ToListAsync(ct);
-        if (ownedIds.Count == 0)
-            return [];
+        await using var db = await contextFactory.CreateDbContextAsync(ct);
+        var owned = db.Assignments.AsNoTracking()
+            .Where(assignment => actor.IsAdministrator || assignment.CreatedByTeacherId == actor.TeacherId);
+        if (assignmentIds is not null)
+            owned = owned.Where(assignment => assignmentIds.Contains(assignment.Id));
 
         var attempts = await db.Attempts.AsNoTracking()
-            .Where(a => ownedIds.Contains(a.AssignmentId)
-                        && (a.State == AttemptState.PendingReview || a.HasPendingManualReview))
-            .OrderBy(a => a.StudentNameSnapshot).ThenBy(a => a.AttemptNumber)
+            .Where(attempt => owned.Any(assignment => assignment.Id == attempt.AssignmentId) &&
+                (attempt.State == AttemptState.PendingReview || attempt.HasPendingManualReview))
+            .OrderBy(attempt => attempt.SubmittedAtUtc).ThenBy(attempt => attempt.Id).Take(10)
+            .Select(attempt => new
+            {
+                attempt.AssignmentId,
+                Item = new ReviewQueueItemDto(attempt.Id, attempt.StudentNameSnapshot, attempt.StudentGroupSnapshot,
+                    attempt.AttemptNumber, attempt.State.ToString(),
+                    db.QuestionGrades.Count(grade => grade.AttemptId == attempt.Id && grade.State == VerificationState.PendingManual),
+                    db.QuestionGrades.Count(grade => grade.AttemptId == attempt.Id),
+                    attempt.SubmittedAtUtc ?? attempt.CompletedAtUtc ?? attempt.CreatedAtUtc),
+            })
             .ToListAsync(ct);
-        var attemptIds = attempts.Select(a => a.Id).ToList();
-        var pendingByAttempt = await db.QuestionGrades.AsNoTracking()
-            .Where(g => attemptIds.Contains(g.AttemptId) && g.State == VerificationState.PendingManual)
-            .GroupBy(g => g.AttemptId)
-            .Select(g => new { AttemptId = g.Key, Count = g.Count() })
-            .ToDictionaryAsync(x => x.AttemptId, x => x.Count, ct);
-
-        return [.. attempts
-            .Select(a => (a.AssignmentId, new ReviewQueueItemDto(
-                a.Id, a.StudentNameSnapshot, a.StudentGroupSnapshot, a.AttemptNumber,
-                a.State.ToString(), pendingByAttempt.GetValueOrDefault(a.Id), 0,
-                a.SubmittedAtUtc ?? a.CompletedAtUtc ?? a.CreatedAtUtc)))
-            .Take(10)];
+        return [.. attempts.Select(attempt => (attempt.AssignmentId, attempt.Item))];
     }
 
-    public async Task<IReadOnlyList<ReviewQueueItemDto>> GetQueueAsync(
+    public Task<IReadOnlyList<ReviewQueueItemDto>> GetQueueAsync(
         TeacherActor actor, Guid assignmentId, string? filter, CancellationToken ct)
-    {
-        await EnsureOwnAssignmentAsync(actor, assignmentId, ct);
-        var attempts = await db.Attempts.AsNoTracking()
-            .Where(a => a.AssignmentId == assignmentId)
-            .OrderBy(a => a.StudentNameSnapshot).ThenBy(a => a.AttemptNumber)
-            .ToListAsync(ct);
-        var attemptIds = attempts.Select(a => a.Id).ToList();
-        var grades = await db.QuestionGrades.AsNoTracking()
-            .Where(g => attemptIds.Contains(g.AttemptId))
-            .ToListAsync(ct);
+        => GetQueueAsync(actor, assignmentId, filter, null, null, 0, null, ct);
 
-        var result = new List<ReviewQueueItemDto>();
-        foreach (var attempt in attempts)
+    public async Task<IReadOnlyList<ReviewQueueItemDto>> GetQueueAsync(
+        TeacherActor actor, Guid assignmentId, string? filter, string? group, Guid? questionVersionId,
+        int skip, int? take, CancellationToken ct)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(ct);
+        await EnsureOwnAssignmentAsync(db, actor, assignmentId, ct);
+        var attempts = db.Attempts.AsNoTracking().Where(attempt => attempt.AssignmentId == assignmentId);
+        attempts = filter switch
         {
-            var criteria = grades.Where(g => g.AttemptId == attempt.Id).ToList();
-            var pending = criteria.Count(c => c.State == VerificationState.PendingManual);
-            var include = filter switch
-            {
-                "pending" => attempt.State == AttemptState.PendingReview || pending > 0,
-                "finalized" => attempt.State == AttemptState.Finalized,
-                _ => true,
-            };
-            if (!include)
-                continue;
-            result.Add(new ReviewQueueItemDto(
-                attempt.Id, attempt.StudentNameSnapshot, attempt.StudentGroupSnapshot, attempt.AttemptNumber,
-                attempt.State.ToString(), pending, criteria.Count, attempt.SubmittedAtUtc ?? attempt.CompletedAtUtc ?? attempt.CreatedAtUtc));
-        }
-        return result;
+            "pending" => attempts.Where(attempt => attempt.State == AttemptState.PendingReview || attempt.HasPendingManualReview),
+            "finalized" => attempts.Where(attempt => attempt.State == AttemptState.Finalized),
+            _ => attempts,
+        };
+        if (!string.IsNullOrWhiteSpace(group))
+            attempts = attempts.Where(attempt => attempt.StudentGroupSnapshot == group);
+        if (questionVersionId is { } id)
+            attempts = attempts.Where(attempt => db.QuestionGrades.Any(grade =>
+                grade.AttemptId == attempt.Id && grade.QuestionVersionId == id &&
+                (filter != "pending" || grade.State == VerificationState.PendingManual)));
+
+        IQueryable<Attempt> page = attempts.OrderBy(attempt => attempt.StudentNameSnapshot)
+            .ThenBy(attempt => attempt.AttemptNumber).ThenBy(attempt => attempt.Id).Skip(skip);
+        if (take is { } limit)
+            page = page.Take(limit);
+
+        return await page.Select(attempt => new ReviewQueueItemDto(
+            attempt.Id, attempt.StudentNameSnapshot, attempt.StudentGroupSnapshot, attempt.AttemptNumber,
+            attempt.State.ToString(),
+            db.QuestionGrades.Count(grade => grade.AttemptId == attempt.Id && grade.State == VerificationState.PendingManual),
+            db.QuestionGrades.Count(grade => grade.AttemptId == attempt.Id),
+            attempt.SubmittedAtUtc ?? attempt.CompletedAtUtc ?? attempt.CreatedAtUtc)).ToListAsync(ct);
+    }
+
+    public async Task<(IReadOnlyList<string> Groups, IReadOnlyList<(Guid Id, string Prompt)> Questions)> GetFiltersAsync(
+        TeacherActor actor, Guid assignmentId, CancellationToken ct)
+    {
+        await using var db = await contextFactory.CreateDbContextAsync(ct);
+        var assignment = await EnsureOwnAssignmentAsync(db, actor, assignmentId, ct);
+        var groups = await db.Attempts.AsNoTracking()
+            .Where(attempt => attempt.AssignmentId == assignmentId && attempt.StudentGroupSnapshot != null)
+            .Select(attempt => attempt.StudentGroupSnapshot!).Distinct().OrderBy(group => group).ToListAsync(ct);
+        var ids = await db.TestVersions.AsNoTracking().Where(version => version.Id == assignment.TestVersionId)
+            .Select(version => version.QuestionVersionIds).SingleAsync(ct);
+        var questions = await db.QuestionVersions.AsNoTracking().Where(version => ids.Contains(version.Id))
+            .ToDictionaryAsync(version => version.Id, version => QuestionDefinitionJson.Deserialize(version.DefinitionJson).Prompt, ct);
+        return (groups, [.. ids.Distinct().Select(id => (id, questions[id]))]);
     }
 
     /// <summary>Детали для проверки: ответ студента + ключ + критерии (только преподавателю, ТЗ §12).</summary>
     public async Task<ReviewAttemptDto> GetAttemptAsync(TeacherActor actor, Guid attemptId, CancellationToken ct)
     {
+        await using var db = await contextFactory.CreateDbContextAsync(ct);
         var attempt = await db.Attempts.AsNoTracking().SingleOrDefaultAsync(a => a.Id == attemptId, ct)
             ?? throw TeacherFlowErrors.NotFound("Попытка не найдена.");
-        await EnsureOwnAssignmentAsync(actor, attempt.AssignmentId, ct);
+        await EnsureOwnAssignmentAsync(db, actor, attempt.AssignmentId, ct);
 
         var sessions = await db.QuestionSessions.AsNoTracking()
             .Where(s => s.AttemptId == attemptId)
@@ -179,84 +191,85 @@ public sealed class ManualReviewService(ExamForgeDbContext db, TimeProvider time
             attempt.State.ToString(),
             grades.Where(g => g.State != VerificationState.PendingManual).Sum(g => g.EarnedPoints),
             grades.Sum(g => g.MaxPoints),
-            questions);
+            questions,
+            attempt.AssignmentId);
     }
 
     /// <summary>
     /// Оценить pending-критерии попытки. Когда pending не остаётся — попытка финализируется
     /// по сумме всех критериев (ТЗ §11: не проверено ≠ 0; итог после проверки).
     /// </summary>
-    public async Task<ReviewAttemptDto> GradeAsync(
+    public Task<ReviewAttemptDto> GradeAsync(
         TeacherActor actor, Guid attemptId, IReadOnlyList<CriterionScoreDto> scores, CancellationToken ct)
-    {
-        var attempt = await db.Attempts.SingleOrDefaultAsync(a => a.Id == attemptId, ct)
-            ?? throw TeacherFlowErrors.NotFound("Попытка не найдена.");
-        await EnsureOwnAssignmentAsync(actor, attempt.AssignmentId, ct);
-        if (attempt.State is not (AttemptState.PendingReview or AttemptState.Submitted))
-            throw TeacherFlowErrors.Conflict("not_pending", $"Проверять можно сданную работу ({attempt.State}).");
-
-        var grades = await db.QuestionGrades.Where(g => g.AttemptId == attemptId).ToListAsync(ct);
-        foreach (var score in scores)
+        => UpdateAsync(actor, attemptId, async (db, attempt) =>
         {
-            var grade = grades.SingleOrDefault(g =>
-                    g.QuestionSessionId == score.QuestionSessionId && g.CriterionId == score.CriterionId)
-                ?? throw TeacherFlowErrors.NotFound($"Критерий {score.CriterionId} не найден.");
-            if (grade.State == VerificationState.PendingManual)
-                grade.GradeManually(score.EarnedPoints, score.Reason, actor.TeacherId, Now);
-        }
+            if (attempt.State is not (AttemptState.PendingReview or AttemptState.Submitted))
+                throw TeacherFlowErrors.Conflict("not_pending", "Проверять можно только сданную работу, которая ещё не оценена.");
 
-        await FinalizeIfCompleteAsync(attempt, grades, ct);
-        return await GetAttemptAsync(actor, attemptId, ct);
-    }
+            var grades = await db.QuestionGrades.Where(grade => grade.AttemptId == attemptId).ToListAsync(ct);
+            var byCriterion = grades.ToDictionary(grade => (grade.QuestionSessionId, grade.CriterionId));
+            foreach (var score in scores)
+            {
+                if (!byCriterion.TryGetValue((score.QuestionSessionId, score.CriterionId), out var grade))
+                    throw TeacherFlowErrors.NotFound("Критерий не найден.");
+                if (grade.State == VerificationState.PendingManual)
+                    grade.GradeManually(score.EarnedPoints, score.Reason, actor.TeacherId, Now);
+            }
 
-    /// <summary>Переоценка подтверждённого критерия финализированной попытки: причина + история до/после (ТЗ §11).</summary>
-    public async Task<ReviewAttemptDto> OverrideAsync(
+            if (grades.All(grade => grade.State != VerificationState.PendingManual))
+                attempt.Finalize(grades.Sum(grade => grade.EarnedPoints), grades.Sum(grade => grade.MaxPoints), Now);
+        }, ct);
+
+    public Task<ReviewAttemptDto> OverrideAsync(
         TeacherActor actor, Guid attemptId, CriterionScoreDto score, CancellationToken ct)
+        => UpdateAsync(actor, attemptId, async (db, attempt) =>
+        {
+            if (attempt.State != AttemptState.Finalized)
+                throw TeacherFlowErrors.Conflict("not_finalized", "Переоценить можно только проверенную работу.");
+
+            var grades = await db.QuestionGrades.Where(grade => grade.AttemptId == attemptId).ToListAsync(ct);
+            var criterion = grades.SingleOrDefault(grade =>
+                    grade.QuestionSessionId == score.QuestionSessionId && grade.CriterionId == score.CriterionId)
+                ?? throw TeacherFlowErrors.NotFound("Критерий не найден.");
+
+            var oldEarned = criterion.EarnedPoints;
+            var oldAttemptEarned = attempt.Score?.EarnedPoints ?? 0m;
+            criterion.Override(score.EarnedPoints, score.Reason, actor.TeacherId, Now);
+
+            var newAttemptEarned = grades.Sum(grade => grade.EarnedPoints);
+            attempt.Regrade(newAttemptEarned, grades.Sum(grade => grade.MaxPoints));
+            db.GradeRevisions.Add(GradeRevision.Create(
+                attemptId, score.QuestionSessionId, score.CriterionId,
+                oldEarned, criterion.EarnedPoints, oldAttemptEarned, newAttemptEarned,
+                score.Reason, actor.TeacherId, Now));
+        }, ct);
+
+    private async Task<ReviewAttemptDto> UpdateAsync(
+        TeacherActor actor, Guid attemptId, Func<ExamForgeDbContext, Attempt, Task> update, CancellationToken ct)
     {
-        var attempt = await db.Attempts.SingleOrDefaultAsync(a => a.Id == attemptId, ct)
-            ?? throw TeacherFlowErrors.NotFound("Попытка не найдена.");
-        await EnsureOwnAssignmentAsync(actor, attempt.AssignmentId, ct);
-        if (attempt.State != AttemptState.Finalized)
-            throw TeacherFlowErrors.Conflict("not_finalized", "Переоценка доступна для финализированной попытки.");
+        await using var db = await contextFactory.CreateDbContextAsync(ct);
+        await db.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        {
+            db.ChangeTracker.Clear();
+            await using var transaction = await db.Database.BeginTransactionAsync(ct);
+            var attempt = await db.Attempts
+                .FromSql($"""SELECT attempts.*, xmin FROM attempts WHERE "Id" = {attemptId} FOR UPDATE""")
+                .SingleOrDefaultAsync(item => db.Assignments.Any(assignment => assignment.Id == item.AssignmentId &&
+                    (actor.IsAdministrator || assignment.CreatedByTeacherId == actor.TeacherId)), ct)
+                ?? throw TeacherFlowErrors.NotFound("Попытка не найдена.");
+            await update(db, attempt);
+            await db.SaveChangesAsync(ct);
+            await transaction.CommitAsync(ct);
+        });
 
-        var grades = await db.QuestionGrades.Where(g => g.AttemptId == attemptId).ToListAsync(ct);
-        var grade = grades.SingleOrDefault(g =>
-                g.QuestionSessionId == score.QuestionSessionId && g.CriterionId == score.CriterionId)
-            ?? throw TeacherFlowErrors.NotFound($"Критерий {score.CriterionId} не найден.");
-
-        var oldEarned = grade.EarnedPoints;
-        var oldAttemptEarned = attempt.Score?.EarnedPoints ?? 0m;
-        grade.Override(score.EarnedPoints, score.Reason, actor.TeacherId, Now);
-
-        var newAttemptEarned = grades.Sum(g => g.EarnedPoints);
-        var max = grades.Sum(g => g.MaxPoints);
-        attempt.Regrade(newAttemptEarned, max);
-
-        db.GradeRevisions.Add(GradeRevision.Create(
-            attemptId, score.QuestionSessionId, score.CriterionId,
-            oldEarned, score.EarnedPoints, oldAttemptEarned, newAttemptEarned,
-            score.Reason, actor.TeacherId, Now));
-        await db.SaveChangesAsync(ct);
         return await GetAttemptAsync(actor, attemptId, ct);
     }
 
-    private async Task FinalizeIfCompleteAsync(Attempt attempt, List<QuestionGrade> grades, CancellationToken ct)
-    {
-        if (grades.Any(g => g.State == VerificationState.PendingManual))
-            return;
-        var earned = grades.Sum(g => g.EarnedPoints);
-        var max = grades.Sum(g => g.MaxPoints);
-        attempt.Finalize(earned, max, Now);
-        await db.SaveChangesAsync(ct);
-    }
-
-    private async Task EnsureOwnAssignmentAsync(TeacherActor actor, Guid assignmentId, CancellationToken ct)
-    {
-        var assignment = await db.Assignments.AsNoTracking()
-            .SingleOrDefaultAsync(a => a.Id == assignmentId, ct);
-        if (assignment is null || (!actor.IsAdministrator && assignment.CreatedByTeacherId != actor.TeacherId))
-            throw TeacherFlowErrors.NotFound("Назначение не найдено.");
-    }
+    private static async Task<Domain.Assignments.Assignment> EnsureOwnAssignmentAsync(
+        ExamForgeDbContext db, TeacherActor actor, Guid assignmentId, CancellationToken ct)
+        => await db.Assignments.AsNoTracking().SingleOrDefaultAsync(assignment => assignment.Id == assignmentId &&
+            (actor.IsAdministrator || assignment.CreatedByTeacherId == actor.TeacherId), ct)
+            ?? throw TeacherFlowErrors.NotFound("Назначение не найдено.");
 
     // ---------- отображение ответа/ключа ----------
 

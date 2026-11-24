@@ -6,6 +6,7 @@
   --ef-muted: #60665f;
   --ef-accent: #284d61;
   --ef-accent-hover: #1d3e50;
+  --ef-on-accent: #ffffff;
   --ef-soft: #e8eef0;
   --ef-burgundy: #7a4143;
   --ef-border: #d5d2c8;
@@ -41,6 +42,7 @@
   --ef-muted: #c0c4bd;
   --ef-accent: #a7c7d4;
   --ef-accent-hover: #c1dde7;
+  --ef-on-accent: #171c20;
   --ef-soft: #2e3c44;
   --ef-burgundy: #e2a7a8;
   --ef-border: #45535b;

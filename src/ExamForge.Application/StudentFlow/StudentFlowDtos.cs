@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace ExamForge.Application.StudentFlow;
 
 /// <summary>
@@ -32,7 +34,8 @@ public sealed record StudentOptionDto(string Id, string Text);
 
 public sealed record StudentTileDto(string TileId, char Letter);
 
-/// <summary>Вопрос для отображения: только формулировка, display options, media-поля и время.</summary>
+/// <summary>Вопрос для отображения: только формулировка, display options, media-поля и время.
+/// SavedAnswerJson — собственная сохранённая ревизия ответа студента (P0-05); ключей и оценивания в ней нет.</summary>
 public sealed record StudentQuestionDto(
     Guid QuestionSessionId,
     Guid QuestionVersionId,
@@ -47,7 +50,8 @@ public sealed record StudentQuestionDto(
     IReadOnlyList<StudentOptionDto>? MatchingRight,
     IReadOnlyList<StudentOptionDto>? OrderingItems,
     IReadOnlyList<StudentOptionDto>? StructuredFields,
-    IReadOnlyList<string>? BlankIds);
+    IReadOnlyList<string>? BlankIds,
+    string? SavedAnswerJson = null);
 
 public sealed record SessionBriefDto(int OrderIndex, string State, int Revision, DateTimeOffset? DeadlineUtc);
 
@@ -59,7 +63,9 @@ public sealed record AttemptStateDto(
     DateTimeOffset? DeadlineUtc,
     int TotalQuestions,
     IReadOnlyList<SessionBriefDto> Sessions,
-    StudentQuestionDto? CurrentQuestion);
+    StudentQuestionDto? CurrentQuestion,
+    DateTimeOffset ServerNowUtc = default,
+    string? Title = null);
 
 /// <summary>Ответ на сохранение (ТЗ §17): acceptedRevision/savedAt/serverNow/deadline/state; без «правильно/неправильно».</summary>
 public sealed record SaveAnswerDto(
@@ -70,6 +76,9 @@ public sealed record SaveAnswerDto(
     string SessionState,
     string? RejectionReason);
 
+public sealed record AttemptAnswer(Guid QuestionSessionId, JsonElement Answer, int? ExpectedRevision = null);
+public sealed record AdvanceQuestionRequest(Guid QuestionSessionId, AttemptAnswer? Answer);
+
 public sealed record LockCurrentDto(string Outcome, int OrderIndex, string SessionState);
 
 public sealed record FinishAttemptDto(
@@ -79,7 +88,9 @@ public sealed record FinishAttemptDto(
     decimal? MaxPoints,
     int? RoundedPercent);
 
-/// <summary>Результат для студента (ТЗ §12): provisional/finalized, баллы и процент; ключей и пояснений нет.</summary>
+public sealed record StudentQuestionFeedbackDto(int Number, string Prompt, decimal Earned, decimal Max, bool Answered);
+
+/// <summary>Результат попытки. Разбор по вопросам выдаётся только после оценки тренировки.</summary>
 public sealed record StudentResultDto(
     string Status,
     bool Provisional,
@@ -87,7 +98,8 @@ public sealed record StudentResultDto(
     decimal MaxPoints,
     int? RoundedPercent,
     DateTimeOffset? CompletedAtUtc,
-    int AttemptNumber);
+    int AttemptNumber,
+    IReadOnlyList<StudentQuestionFeedbackDto>? Feedback = null);
 
 public sealed record StudentAssignmentDto(
     Guid AssignmentId,
@@ -99,7 +111,11 @@ public sealed record StudentAssignmentDto(
     int UsedAttempts,
     bool HasActiveAttempt,
     Guid? ActiveAttemptId,
-    IReadOnlyList<StudentAttemptBriefDto> Attempts);
+    IReadOnlyList<StudentAttemptBriefDto> Attempts,
+    bool HasExtraAttempt = false,
+    int? QuestionCount = null,
+    int? PerQuestionTimeLimitSeconds = null,
+    int? TotalTimeLimitSeconds = null);
 
 /// <summary>Краткая сводка попытки студента: баллы/процент без ключей и пояснений (ТЗ §9, §12).</summary>
 public sealed record StudentAttemptBriefDto(

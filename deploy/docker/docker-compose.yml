@@ -1,5 +1,5 @@
 # Exam Forge — стек развёртывания (§21): отдельный project name/сеть/тома.
-# SugarGuard не затрагивается: своя сеть, своя БД в контейнере, порт 8080 наружу.
+# SugarGuard не затрагивается: своя сеть, своя БД в контейнере и локальный порт приложения.
 name: examforge
 
 services:
@@ -27,7 +27,7 @@ services:
 
   app:
     build:
-      context: .
+      context: ../..
       dockerfile: deploy/docker/Dockerfile
     restart: unless-stopped
     depends_on:
@@ -35,17 +35,18 @@ services:
         condition: service_healthy
     environment:
       ASPNETCORE_ENVIRONMENT: Production
-      # Пилот по IP без домена: HTTP, cookie SameAsRequest (перевод на домен+HTTPS — отдельно).
-      ExamForge__HttpsRedirection: "false"
-      ExamForge__Cookies__SecurePolicy: SameAsRequest
-      # Диагностика медленной загрузки (временно): транспорт и тайминги каждого circuit.
-      # Http.Connections — категория negotiate/транспорта (SignalR — только hub-уровень).
-      Logging__LogLevel__Microsoft.AspNetCore.Http.Connections: Debug
-      Logging__LogLevel__Microsoft.AspNetCore.SignalR: Debug
-      Logging__LogLevel__Microsoft.AspNetCore.Components.Server: Debug
+      # Production-доступ только через HTTPS reverse proxy (nginx/Caddy слушает :443,
+      # контейнер отдаёт HTTP на 127.0.0.1:8080 — см. deploy/nginx).
+      ExamForge__HttpsRedirection: "true"
+      # Порт для редиректов HTTP→HTTPS (терминируется на прокси).
+      ASPNETCORE_HTTPS_PORT: "443"
+      # Прокси гарантирует TLS: cookie преподавателя, студента и antiforgery — Secure.
+      ExamForge__Cookies__SecurePolicy: "Always"
       ConnectionStrings__Default: "Host=db;Port=5432;Database=examforge;Username=examforge;Password=${EXAMFORGE_DB_PASSWORD}"
       ExamForge__InvitationHmacKey: ${EXAMFORGE_HMAC_KEY:?Задайте EXAMFORGE_HMAC_KEY в .env}
-      ExamForge__RateLimits__ExchangePerMinute: "15"
+      ExamForge__RateLimits__ExchangePerMinute: "90"
+      # Host-filtering: в production не "*" (домен задаётся в .env).
+      AllowedHosts: ${EXAMFORGE_ALLOWED_HOSTS:?Задайте EXAMFORGE_ALLOWED_HOSTS в .env}
       EXAMFORGE_STORAGE_ROOT: /data/storage
       TZ: Europe/Moscow
     volumes:
@@ -54,7 +55,8 @@ services:
     networks:
       - examforge
     ports:
-      - "8080:8080" # заменить при конфликте порта (проверяется инвентаризацией)
+      # Публикуем только на loopback: в Internet смотрит лишь reverse proxy (nginx/Caddy).
+      - "127.0.0.1:8080:8080"
     mem_limit: 1536m
 
 volumes:

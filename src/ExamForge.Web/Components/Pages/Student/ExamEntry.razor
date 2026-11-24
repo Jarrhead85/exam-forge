@@ -1,0 +1,358 @@
+@page "/exam"
+@layout ExamForge.Web.Client.StudentLayout
+@using System.ComponentModel.DataAnnotations
+@using ExamForge.Application.StudentFlow
+@using ExamForge.Domain.Access
+@using ExamForge.Infrastructure.Services
+@using ExamForge.Web.Authentication
+@using Microsoft.AspNetCore.Authentication
+@inject StudentFlowService Flow
+@inject InvitationCodeHasher CodeHasher
+@inject NavigationManager Navigation
+@inject TimeProvider TimeProvider
+
+<PageTitle>Работы студента — Exam Forge</PageTitle>
+
+@if (_identity is null || (_link is not null && _showLink))
+{
+    <section class="ef-card ef-entry-card" aria-labelledby="code-title">
+        <h1 id="code-title" class="ef-card__title">@(_showLink ? _linkTitle ?? "Вход по ссылке" : "Вход на работу")</h1>
+
+        @if (!_showLink)
+        {
+            <nav class="ef-entry-switcher" aria-label="Способ входа">
+                <a href="/exam" aria-current="@(UseAccount ? null : "page")">Код приглашения</a>
+                <a href="/exam?mode=account" aria-current="@(UseAccount ? "page" : null)">Логин и пароль</a>
+            </nav>
+        }
+
+        @if (_showLink && _linkTitle is null)
+        {
+            <p class="ef-form-error" role="alert">Ссылка отключена или недействительна. Попросите преподавателя выдать новую.</p>
+            <a href="/exam">Войти по коду</a>
+        }
+        else if (_showLink)
+        {
+            <p class="ef-card__meta">Преподаватель увидит ваше имя и группу в ведомости.</p>
+            <EditForm Model="LinkInput" FormName="exam-link" OnValidSubmit="EnterLinkAsync" class="ef-form">
+                <DataAnnotationsValidator />
+                <div class="ef-field">
+                    <label for="l-last">Фамилия</label>
+                    <InputText id="l-last" @bind-Value="LinkInput.LastName" autocomplete="family-name" required />
+                    <ValidationMessage For="() => LinkInput.LastName" />
+                </div>
+                <div class="ef-field">
+                    <label for="l-first">Имя</label>
+                    <InputText id="l-first" @bind-Value="LinkInput.FirstName" autocomplete="given-name" required />
+                    <ValidationMessage For="() => LinkInput.FirstName" />
+                </div>
+                <div class="ef-field">
+                    <label for="l-middle">Отчество (если есть)</label>
+                    <InputText id="l-middle" @bind-Value="LinkInput.MiddleName" autocomplete="additional-name" />
+                    <ValidationMessage For="() => LinkInput.MiddleName" />
+                </div>
+                <div class="ef-field">
+                    <label for="l-group">Группа</label>
+                    <InputText id="l-group" @bind-Value="LinkInput.Group" required />
+                    <ValidationMessage For="() => LinkInput.Group" />
+                </div>
+                @ErrorMessage
+                <button class="ef-button ef-button--primary" type="submit">Продолжить</button>
+            </EditForm>
+        }
+        else if (UseAccount)
+        {
+            <EditForm Model="LoginInput" FormName="exam-account" OnValidSubmit="SignInAsync" class="ef-form">
+                <DataAnnotationsValidator />
+                <div class="ef-field">
+                    <label for="acc-login">Логин</label>
+                    <InputText id="acc-login" @bind-Value="LoginInput.Login" autocomplete="username" required />
+                    <ValidationMessage For="() => LoginInput.Login" />
+                </div>
+                <div class="ef-field">
+                    <label for="acc-password">Пароль</label>
+                    <input id="acc-password" name="LoginInput.Password" type="password" autocomplete="current-password" required />
+                    <ValidationMessage For="() => LoginInput.Password" />
+                </div>
+                @ErrorMessage
+                <button class="ef-button ef-button--primary" type="submit">Войти</button>
+            </EditForm>
+        }
+        else
+        {
+            <p class="ef-card__meta">Введите код, который выдал преподаватель.</p>
+            <EditForm Model="CodeInput" FormName="exam-code" OnValidSubmit="EnterCodeAsync" class="ef-form">
+                <DataAnnotationsValidator />
+                <div class="ef-field">
+                    <label for="exam-code">Код приглашения</label>
+                    <InputText id="exam-code" @bind-Value="CodeInput.Code" autocomplete="one-time-code"
+                               autocapitalize="characters" spellcheck="false" maxlength="32" placeholder="XXXX-XXXX-XXXX" required />
+                    <ValidationMessage For="() => CodeInput.Code" />
+                </div>
+                @ErrorMessage
+                <button class="ef-button ef-button--primary" type="submit">Продолжить</button>
+            </EditForm>
+        }
+
+        <p><a href="exam/help">Справка студента</a></p>
+    </section>
+}
+else
+{
+    <div class="ef-page-heading">
+        <h1>Доступные работы</h1>
+        <form method="post" @formname="exam-logout" @onsubmit="SignOutAsync">
+            <AntiforgeryToken />
+            <button type="submit" class="ef-button ef-button--quiet">Выйти</button>
+        </form>
+    </div>
+    <p><a href="exam/materials">Мои лекции (PDF)</a> · <a href="exam/help">Справка студента</a></p>
+    @ErrorMessage
+
+    @if (_assignments.Count == 0)
+    {
+        <p class="ef-callout ef-callout--info">Работ пока нет. Если преподаватель уже выдал код, выйдите из аккаунта и введите код.</p>
+    }
+
+    <form id="start-assignment" method="post" @formname="exam-start" @onsubmit="StartAsync">
+        <AntiforgeryToken />
+    </form>
+
+    @foreach (var assignment in _assignments)
+    {
+        var open = assignment.OpensAtUtc <= TimeProvider.GetUtcNow() &&
+            (assignment.ClosesAtUtc is null || assignment.ClosesAtUtc > TimeProvider.GetUtcNow());
+        <section class="ef-card ef-exam-assignment" aria-labelledby="a-@assignment.AssignmentId">
+            <p class="ef-card__eyebrow">@(assignment.Mode == "Assessment" ? "Контрольная" : "Тренировка")</p>
+            <h2 id="a-@assignment.AssignmentId" class="ef-card__title">@assignment.Title</h2>
+            <ul class="ef-exam-rules">
+                <li>Вопросов: @assignment.QuestionCount</li>
+                <li>Попыток использовано: @assignment.UsedAttempts из @assignment.MaxAttempts</li>
+                @if (assignment.PerQuestionTimeLimitSeconds is { } perQuestion)
+                {
+                    <li>На вопрос: @TimeLabel(perQuestion)</li>
+                }
+                else
+                {
+                    <li>Время зависит от вопроса</li>
+                }
+                @if (assignment.TotalTimeLimitSeconds is { } total)
+                {
+                    <li>На всю работу: @TimeLabel(total)</li>
+                }
+                <li>Вопросы открываются по порядку</li>
+            </ul>
+            @if (assignment.HasActiveAttempt)
+            {
+                <a class="ef-button ef-button--primary" href="@($"exam/run/{assignment.ActiveAttemptId}")">Продолжить работу</a>
+            }
+            else if (!open)
+            {
+                <p class="ef-card__meta">@(assignment.OpensAtUtc > TimeProvider.GetUtcNow()
+                    ? $"Откроется {DisplayTime(assignment.OpensAtUtc)}."
+                    : "Срок выполнения истёк.")</p>
+            }
+            else if (assignment.UsedAttempts < assignment.MaxAttempts || assignment.HasExtraAttempt)
+            {
+                <button form="start-assignment" class="ef-button ef-button--primary" type="submit"
+                        name="StartAssignmentId" value="@assignment.AssignmentId">
+                    @(assignment.UsedAttempts < assignment.MaxAttempts ? "Начать работу" : "Начать дополнительную попытку")
+                </button>
+            }
+            else
+            {
+                <p class="ef-card__meta">Лимит попыток исчерпан. За дополнительной попыткой обратитесь к преподавателю.</p>
+            }
+
+            @if (assignment.Attempts.Count > 0)
+            {
+                <div class="ef-table-scroll" role="region" aria-label="Мои попытки и результаты" tabindex="0">
+                    <table class="ef-table">
+                        <caption>Мои попытки и результаты</caption>
+                        <thead>
+                            <tr><th scope="col">№</th><th scope="col">Статус</th><th scope="col">Баллы</th><th scope="col">Завершена</th><th scope="col">Просмотр</th></tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var attempt in assignment.Attempts)
+                            {
+                                <tr>
+                                    <td>@attempt.AttemptNumber</td>
+                                    <td>@StatusText(attempt.Status)</td>
+                                    <td>@(attempt.EarnedPoints is { } e ? $"{e:0.##} / {attempt.MaxPoints:0.##}" : "—")</td>
+                                    <td>@(attempt.CompletedAtUtc is { } time ? DisplayTime(time) : "—")</td>
+                                    <td><a href="@($"exam/run/{attempt.AttemptId}")" aria-label="@($"Открыть попытку {attempt.AttemptNumber}")">Открыть</a></td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        </section>
+    }
+}
+
+@code {
+    [CascadingParameter] private HttpContext Http { get; set; } = default!;
+    [SupplyParameterFromQuery(Name = "link")] private string? Link { get; set; }
+    [SupplyParameterFromQuery(Name = "mode")] private string? Mode { get; set; }
+    [SupplyParameterFromForm(FormName = "exam-code")] private StudentCodeInput CodeInput { get; set; } = new();
+    [SupplyParameterFromForm(FormName = "exam-account")] private StudentLoginInput LoginInput { get; set; } = new();
+    [SupplyParameterFromForm(FormName = "exam-link")] private StudentLinkInput LinkInput { get; set; } = new();
+    [SupplyParameterFromForm(FormName = "exam-start")] private Guid StartAssignmentId { get; set; }
+
+    private IReadOnlyList<StudentAssignmentDto> _assignments = [];
+    private StudentIdentity? _identity;
+    private string? _link;
+    private string? _linkTitle;
+    private string? _error;
+    private bool _showLink;
+    private bool UseAccount => Mode == "account";
+    private CancellationToken RequestCancellation => Http.RequestAborted;
+
+    private RenderFragment ErrorMessage => @<text>
+        @if (_error is not null)
+        {
+            <p class="ef-form-error" role="alert">@_error</p>
+        }
+    </text>;
+
+    protected override async Task OnInitializedAsync()
+    {
+        Http.Response.Headers.CacheControl = "no-store";
+        var auth = await Http.AuthenticateAsync(StudentAuth.Scheme);
+        _identity = auth.Principal?.StudentIdentity();
+        _link = string.IsNullOrWhiteSpace(Link) ? null : Link.Trim();
+        _showLink = _link is not null && (_identity is null ||
+            auth.Principal?.FindFirst(StudentAuth.LinkClaim)?.Value != InvitationCode.Normalize(_link));
+
+        if (_showLink && _link is not null)
+            _linkTitle = await Flow.CommonLinkTitleAsync(_link, RequestCancellation);
+        else if (_identity is not null)
+            _assignments = await Flow.ListAssignmentsAsync(_identity, RequestCancellation);
+    }
+
+    private async Task EnterCodeAsync()
+    {
+        try
+        {
+            var (invitation, _) = await Flow.ValidateExchangeAsync(CodeHasher, CodeInput.Code, RequestCancellation);
+            await Http.SignInStudentAsync(StudentAuth.Scheme, StudentAuth.CreatePrincipal(invitation));
+            Navigation.NavigateTo("/exam");
+        }
+        catch (StudentFlowException ex)
+        {
+            _error = ex.Message;
+        }
+    }
+
+    private async Task EnterLinkAsync()
+    {
+        if (_link is null)
+            return;
+
+        try
+        {
+            var (profile, assignment) = await Flow.EnterByCommonLinkAsync(_link, LinkInput.LastName, LinkInput.FirstName,
+                LinkInput.MiddleName, LinkInput.Group, RequestCancellation);
+            await Http.SignInStudentAsync(StudentAuth.Scheme,
+                StudentAuth.CreateCommonLinkPrincipal(assignment.Id, profile.Id, assignment.CommonLinkCode!, LinkInput.Group));
+            Navigation.NavigateTo("/exam");
+        }
+        catch (StudentFlowException ex)
+        {
+            _error = ex.Message;
+        }
+        catch (ExamForge.Domain.Common.DomainException ex)
+        {
+            _error = ex.Message;
+        }
+    }
+
+    private async Task SignInAsync()
+    {
+        var account = await Flow.ValidateStudentLoginAsync(LoginInput.Login.Trim(), LoginInput.Password, RequestCancellation);
+        if (account is null)
+        {
+            _error = "Неверный логин или пароль. Проверьте данные и попробуйте ещё раз.";
+            return;
+        }
+        await Http.SignInStudentAsync(StudentAuth.Scheme, StudentAuth.CreateAccountPrincipal(account));
+        Navigation.NavigateTo("/exam");
+    }
+
+    private async Task SignOutAsync()
+    {
+        await Http.SignOutAsync(StudentAuth.Scheme);
+        Navigation.NavigateTo("/exam");
+    }
+
+    private async Task StartAsync()
+    {
+        if (_identity is null)
+        {
+            Navigation.NavigateTo("/exam");
+            return;
+        }
+        try
+        {
+            var attempt = await Flow.StartAttemptAsync(StartAssignmentId, _identity, RequestCancellation);
+            Navigation.NavigateTo($"/exam/run/{attempt.AttemptId}");
+        }
+        catch (StudentFlowException ex)
+        {
+            _error = ex.Message;
+        }
+    }
+
+    private string DisplayTime(DateTimeOffset time)
+        => TimeZoneInfo.ConvertTime(time, TimeProvider.LocalTimeZone).ToString("dd.MM.yyyy HH:mm (zzz)");
+
+    private static string TimeLabel(int seconds)
+        => seconds % 60 == 0 ? $"{seconds / 60} мин" : $"{seconds} с";
+
+    private static string StatusText(string status) => status switch
+    {
+        "InProgress" => "Проходит",
+        "PendingReview" => "Ждёт проверки",
+        "Submitted" => "Сдано",
+        "Finalized" => "Оценено",
+        "Cancelled" => "Отменено",
+        _ => status,
+    };
+
+    private sealed class StudentCodeInput
+    {
+        [Required(ErrorMessage = "Введите код приглашения.")]
+        [StringLength(32, ErrorMessage = "Проверьте длину кода.")]
+        public string Code { get; set; } = "";
+    }
+
+    private sealed class StudentLoginInput
+    {
+        [Required(ErrorMessage = "Введите логин.")]
+        [StringLength(64, ErrorMessage = "Проверьте длину логина.")]
+        public string Login { get; set; } = "";
+
+        [Required(ErrorMessage = "Введите пароль.")]
+        [StringLength(128, ErrorMessage = "Проверьте длину пароля.")]
+        public string Password { get; set; } = "";
+    }
+
+    private sealed class StudentLinkInput
+    {
+        [Required(ErrorMessage = "Введите фамилию.")]
+        [StringLength(100, ErrorMessage = "Фамилия должна быть короче 101 символа.")]
+        public string LastName { get; set; } = "";
+
+        [Required(ErrorMessage = "Введите имя.")]
+        [StringLength(100, ErrorMessage = "Имя должно быть короче 101 символа.")]
+        public string FirstName { get; set; } = "";
+
+        [StringLength(100, ErrorMessage = "Отчество должно быть короче 101 символа.")]
+        public string? MiddleName { get; set; }
+
+        [Required(ErrorMessage = "Введите группу.")]
+        [StringLength(200, ErrorMessage = "Название группы должно быть короче 201 символа.")]
+        public string Group { get; set; } = "";
+    }
+}

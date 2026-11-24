@@ -18,7 +18,7 @@ namespace ExamForge.Infrastructure.Migrations
         {
 #pragma warning disable 612, 618
             modelBuilder
-                .HasAnnotation("ProductVersion", "10.0.12")
+                .HasAnnotation("ProductVersion", "10.0.14")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
@@ -148,6 +148,10 @@ namespace ExamForge.Infrastructure.Migrations
 
                     b.Property<int>("FailedAttempts")
                         .HasColumnType("integer");
+
+                    b.Property<string>("GroupNameSnapshot")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
 
                     b.Property<DateTimeOffset?>("LockedUntilUtc")
                         .HasColumnType("timestamp with time zone");
@@ -461,15 +465,25 @@ namespace ExamForge.Infrastructure.Migrations
                     b.Property<DateTimeOffset>("CreatedAtUtc")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<int>("Mode")
+                        .HasColumnType("integer");
+
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasMaxLength(200)
                         .HasColumnType("character varying(200)");
 
+                    b.Property<Guid>("OwnerTeacherId")
+                        .HasColumnType("uuid");
+
                     b.Property<Guid>("SubjectId")
                         .HasColumnType("uuid");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("Mode");
+
+                    b.HasIndex("OwnerTeacherId");
 
                     b.HasIndex("SubjectId");
 
@@ -529,6 +543,32 @@ namespace ExamForge.Infrastructure.Migrations
                     b.HasIndex("DictionaryId", "Lemma");
 
                     b.ToTable("dictionary_entries", (string)null);
+                });
+
+            modelBuilder.Entity("ExamForge.Domain.Dictionary.DictionaryGrant", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("DictionaryId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("GrantedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("GrantedByTeacherId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("TeacherId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DictionaryId", "TeacherId")
+                        .IsUnique();
+
+                    b.ToTable("dictionary_grants", (string)null);
                 });
 
             modelBuilder.Entity("ExamForge.Domain.Dictionary.ImportJob", b =>
@@ -908,6 +948,9 @@ namespace ExamForge.Infrastructure.Migrations
                         .IsRequired()
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)");
+
+                    b.Property<Guid>("SessionVersion")
+                        .HasColumnType("uuid");
 
                     b.Property<Guid>("StudentProfileId")
                         .HasColumnType("uuid");
@@ -1594,6 +1637,15 @@ namespace ExamForge.Infrastructure.Migrations
                         });
 
                     b.Navigation("Features");
+                });
+
+            modelBuilder.Entity("ExamForge.Domain.Dictionary.DictionaryGrant", b =>
+                {
+                    b.HasOne("ExamForge.Domain.Dictionary.Dictionary", null)
+                        .WithMany()
+                        .HasForeignKey("DictionaryId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("ExamForge.Domain.Dictionary.ImportJob", b =>

@@ -18,7 +18,6 @@ public sealed class CatalogController(
     AdminTeachersService adminTeachers,
     ResultsService results,
     TeacherQuestionsService questions,
-    TeacherAssignmentsService assignments,
     ExamForgeDbContext db,
     TimeProvider timeProvider,
     UserManager<TeacherUser> userManager) : ControllerBase
@@ -112,11 +111,11 @@ public sealed class CatalogController(
 
     [HttpGet("/api/dictionaries")]
     public async Task<IActionResult> ListDictionaries(CancellationToken ct)
-        => Ok(await dictionary.ListAsync(ct));
+        => Ok(await dictionary.ListAsync(await ActorAsync(), ct));
 
     [HttpGet("/api/dictionaries/{dictionaryId:guid}/entries")]
     public async Task<IActionResult> Entries(Guid dictionaryId, CancellationToken ct)
-        => Ok(await dictionary.EntriesAsync(dictionaryId, ct));
+        => Ok(await dictionary.EntriesAsync(await ActorAsync(), dictionaryId, ct));
 
     [HttpPost("/api/dictionaries/{dictionaryId:guid}/import")]
     [RequestSizeLimit(30 * 1024 * 1024)]
@@ -146,8 +145,9 @@ public sealed class CatalogController(
     [HttpPost("/api/dictionary-entries/{entryId:guid}/draft-question")]
     public async Task<IActionResult> DraftQuestion(Guid entryId, CancellationToken ct)
     {
-        var entry = await dictionary.LoadEntryAsync(entryId, ct);
-        var others = await dictionary.EntriesAsync(entry.DictionaryId, ct);
+        var actor = await ActorAsync();
+        var entry = await dictionary.LoadEntryAsync(actor, entryId, ct);
+        var others = await dictionary.EntriesAsync(actor, entry.DictionaryId, ct);
         var distractors = others
             .Where(o => o.EntryId != entryId && o.Translations.Count > 0)
             .Select(o => o.Translations[0])
@@ -156,13 +156,12 @@ public sealed class CatalogController(
             .ToList();
         var definition = Domain.Questions.DictionaryDraftFactory.BuildTranslationChoice(
             entry, distractors, timeLimitSeconds: 40);
-        var actor = await ActorAsync();
-        var version = await questions.CreateDraftAsync(actor, await SubjectOfDictionaryAsync(entry.DictionaryId, ct), definition, ct);
+        var version = await questions.CreateDraftAsync(actor, await SubjectOfDictionaryAsync(actor, entry.DictionaryId, ct), definition, ct);
         return Ok(new { questionId = version.QuestionId, draft = true });
     }
 
-    private async Task<Guid> SubjectOfDictionaryAsync(Guid dictionaryId, CancellationToken ct)
-        => await dictionary.LoadDictionarySubjectAsync(dictionaryId, ct);
+    private async Task<Guid> SubjectOfDictionaryAsync(TeacherActor actor, Guid dictionaryId, CancellationToken ct)
+        => await dictionary.LoadDictionarySubjectAsync(actor, dictionaryId, ct);
 
     // ---------- Преподаватели (§3.1, только админ) ----------
 
@@ -189,9 +188,7 @@ public sealed class CatalogController(
     [HttpGet("/api/assignments/{assignmentId:guid}/gradebook.xlsx")]
     public async Task<IActionResult> GradebookXlsx(Guid assignmentId, CancellationToken ct)
     {
-        var actor = await ActorAsync();
-        var details = await assignments.GetAssignmentAsync(actor, assignmentId, ct);
-        var bytes = results.GradebookXlsx(actor, assignmentId, details.Assignment.TestTitle, ct);
+        var bytes = await results.GradebookXlsxAsync(await ActorAsync(), assignmentId, ct);
         return File(bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             $"gradebook-{assignmentId:N}.xlsx");
     }

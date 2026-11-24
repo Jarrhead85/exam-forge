@@ -1,11 +1,14 @@
+using System.Text.Json;
 using ExamForge.Application.StudentFlow;
 using ExamForge.Domain.Access;
 using ExamForge.Domain.Assignments;
+using ExamForge.Domain.Common;
 using ExamForge.Domain.Attempts;
 using ExamForge.Domain.Questions;
 using ExamForge.Domain.Testing;
 using ExamForge.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace ExamForge.Infrastructure.Services;
 
@@ -14,7 +17,8 @@ namespace ExamForge.Infrastructure.Services;
 /// Сервер владеет временем (TimeProvider) и состоянием; все переходы — через доменные методы.
 /// Идемпотентность start/finish, одна активная попытка, поздние ответы отклоняются (ADR-003).
 /// </summary>
-public sealed class StudentFlowService(ExamForgeDbContext db, TimeProvider timeProvider)
+public sealed class StudentFlowService(
+    ExamForgeDbContext db, TimeProvider timeProvider, ILogger<StudentFlowService> logger)
 {
     private DateTimeOffset Now => timeProvider.GetUtcNow();
 
@@ -67,6 +71,8 @@ public sealed class StudentFlowService(ExamForgeDbContext db, TimeProvider timeP
         if (!assignment.IsOpenAt(Now))
             throw new StudentFlowException(409, "assignment_closed", "Назначение сейчас недоступно.");
 
+        if (!string.IsNullOrWhiteSpace(group))
+            Guard.Required(group, "Группа", 200);
         var profile = Domain.People.StudentProfile.Create(lastName, firstName, middleName, Now, null, identified: false);
         db.StudentProfiles.Add(profile);
         await db.SaveChangesAsync(ct);
@@ -97,6 +103,60 @@ public sealed class StudentFlowService(ExamForgeDbContext db, TimeProvider timeP
         account.RegisterSuccessfulLogin(now);
         await db.SaveChangesAsync(ct);
         return account;
+    }
+
+    public async Task<string?> CommonLinkTitleAsync(string linkCode, CancellationToken ct)
+    {
+        var code = InvitationCode.Normalize(linkCode);
+        if (!InvitationCode.IsValidFormat(code))
+            return null;
+
+        return await (from assignment in db.Assignments.AsNoTracking()
+                      join version in db.TestVersions.AsNoTracking() on assignment.TestVersionId equals version.Id
+                      where assignment.AllowCommonLink && assignment.CommonLinkCode == code
+                      select version.Title).SingleOrDefaultAsync(ct);
+    }
+
+    public async Task<IReadOnlyList<StudentAssignmentDto>> ListAssignmentsAsync(StudentIdentity who, CancellationToken ct)
+    {
+        if (who.StudentProfileId is not { } profileId)
+            return [];
+
+        var rows = await (from assignment in db.Assignments.AsNoTracking()
+                          join version in db.TestVersions.AsNoTracking() on assignment.TestVersionId equals version.Id
+                          where who.AssignmentId != null ? assignment.Id == who.AssignmentId :
+                              db.Invitations.Any(invitation => invitation.AssignmentId == assignment.Id &&
+                                  invitation.StudentProfileId == profileId && invitation.Status == InvitationStatus.Active)
+                          orderby assignment.OpensAtUtc descending
+                          select new
+                          {
+                              Assignment = assignment,
+                              version.Title,
+                              QuestionCount = version.QuestionVersionIds.Count,
+                              HasExtraAttempt = db.ExtraAttemptGrants.Any(grant => grant.AssignmentId == assignment.Id &&
+                                  grant.StudentProfileId == profileId && grant.UsedByAttemptId == null),
+                          }).ToListAsync(ct);
+
+        var ids = rows.Select(row => row.Assignment.Id).ToArray();
+        var allAttempts = await db.Attempts.AsNoTracking()
+            .Where(attempt => attempt.StudentProfileId == profileId && ids.Contains(attempt.AssignmentId))
+            .OrderBy(attempt => attempt.AttemptNumber).ToListAsync(ct);
+        var attemptsByAssignment = allAttempts.ToLookup(attempt => attempt.AssignmentId);
+
+        return [.. rows.Select(row =>
+        {
+            var assignment = row.Assignment;
+            var attempts = attemptsByAssignment[assignment.Id];
+            var active = attempts.FirstOrDefault(attempt => attempt.State is AttemptState.Created or AttemptState.InProgress);
+            var history = attempts.Where(attempt => attempt.State != AttemptState.Created)
+                .Select(attempt => new StudentAttemptBriefDto(attempt.Id, attempt.AttemptNumber, attempt.State.ToString(),
+                    attempt.ScoreEarnedPoints, attempt.ScoreMaxPoints, attempt.Score?.RoundedPercent, attempt.CompletedAtUtc))
+                .ToList();
+            return new StudentAssignmentDto(assignment.Id, row.Title, assignment.Mode.ToString(), assignment.OpensAtUtc,
+                assignment.ClosesAtUtc, assignment.MaxAttempts, attempts.Count(attempt => attempt.State != AttemptState.Cancelled),
+                active is not null, active?.Id, history, row.HasExtraAttempt, row.QuestionCount,
+                assignment.PerQuestionTimeLimitSeconds, assignment.AttemptTotalTimeLimitSeconds);
+        })];
     }
 
     // ---------- Попытки ----------
@@ -138,43 +198,78 @@ public sealed class StudentFlowService(ExamForgeDbContext db, TimeProvider timeP
                 throw StudentFlowException.Conflict("attempts_exhausted",
                     "Лимит попыток исчерпан. Дополнительную попытку выдаёт преподаватель.");
 
-            var attempt = await CreateAttemptAsync(assignment, testVersion, profileId, usedCount + 1, grant.Id, who.GroupName, ct);
-            grant.MarkUsed(attempt.Id);
-            await db.SaveChangesAsync(ct);
-            return await BuildStateAsync(attempt, ct);
+            var granted = await BuildNewAttemptAsync(assignment, testVersion, profileId, usedCount + 1, grant.Id, who.GroupName, ct);
+            grant.MarkUsed(granted.Id);
+            try
+            {
+                await db.SaveChangesAsync(ct); // attempt + sessions + grant атомарно (P0-07)
+            }
+            catch (DbUpdateException ex) when (IsUniqueActiveViolation(ex))
+            {
+                return await AdoptWinnerStateAsync(assignment, profileId, now, ct);
+            }
+            return await BuildStateAsync(granted, ct);
         }
 
-        var created = await CreateAttemptAsync(assignment, testVersion, profileId, usedCount + 1, null, who.GroupName, ct);
+        var created = await BuildNewAttemptAsync(assignment, testVersion, profileId, usedCount + 1, null, who.GroupName, ct);
         try
         {
+            // P0-07: Attempt и QuestionSessions создаются одним SaveChanges (одна транзакция),
+            // unique violation ловится только здесь — больше нет промежуточных сохранений
+            // до try/catch, из-за которых посторонний 500 «протекал» наружу.
             await db.SaveChangesAsync(ct);
         }
-        catch (DbUpdateException)
+        catch (DbUpdateException ex) when (IsUniqueActiveViolation(ex))
         {
-            // Гонка двух start: уникальный индекс активной попытки — возвращаем существующую.
-            db.Entry(created).State = EntityState.Detached;
-            var winner = await db.Attempts.AsNoTracking().FirstAsync(
-                a => a.AssignmentId == assignmentId && a.StudentProfileId == profileId
-                     && (a.State == AttemptState.Created || a.State == AttemptState.InProgress), ct);
-            var tracked = await db.Attempts.FirstAsync(a => a.Id == winner.Id, ct);
-            return await BuildStateAsync(tracked, ct);
+            return await AdoptWinnerStateAsync(assignment, profileId, now, ct);
         }
         return await BuildStateAsync(created, ct);
     }
 
-    private async Task<Attempt> CreateAttemptAsync(
+    /// <summary>Ожидаемая гонка двух start (PostgreSQL 23505 + ix_attempts_unique_active);
+    /// остальные DbUpdateException — genuine ошибки и не «глотаются».</summary>
+    private static bool IsUniqueActiveViolation(DbUpdateException ex)
+        => ex.InnerException is Npgsql.PostgresException pg
+            && pg.SqlState == Npgsql.PostgresErrorCodes.UniqueViolation
+            && string.Equals(pg.ConstraintName, "ix_attempts_unique_active", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Другой запрос выиграл гонку: продолжаем с его попыткой (AC-07), без 500 и без
+    /// второй активной попытки. Start идемпотентен (Created → InProgress).</summary>
+    private async Task<AttemptStateDto> AdoptWinnerStateAsync(
+        Assignment assignment, Guid profileId, DateTimeOffset now, CancellationToken ct)
+    {
+        db.ChangeTracker.Clear(); // изменения проигравшего запроса отброшены
+        var winner = await db.Attempts.FirstAsync(
+            a => a.AssignmentId == assignment.Id && a.StudentProfileId == profileId
+                 && (a.State == AttemptState.Created || a.State == AttemptState.InProgress), ct);
+        winner.Start(now, Seconds(assignment.AttemptTotalTimeLimitSeconds));
+        await db.SaveChangesAsync(ct);
+        return await BuildStateAsync(winner, ct);
+    }
+
+    /// <summary>Формирует Attempt + QuestionSessions в памяти БЕЗ SaveChanges (P0-07):
+    /// сохранение выполняет вызывающий код одним атомарным SaveChangesAsync.</summary>
+    private async Task<Attempt> BuildNewAttemptAsync(
         Assignment assignment, TestVersion testVersion, Guid profileId, int number, Guid? grantId,
         string? groupSnapshot, CancellationToken ct)
     {
         var profile = await db.StudentProfiles.AsNoTracking().SingleAsync(p => p.Id == profileId, ct);
         // Варианты назначаются циклически по номеру попытки (предложение; D-08 требует подтверждения).
         var variant = await PickVariantAsync(testVersion.Id, number, ct);
-        var attempt = Attempt.Create(
-            assignment.Id, number, Now, profileId, NameOf(profile), groupSnapshot, grantId, variant?.Id);
+        groupSnapshot ??= await db.Invitations.AsNoTracking().Where(invitation =>
+            invitation.AssignmentId == assignment.Id && invitation.StudentProfileId == profileId &&
+            invitation.Status == InvitationStatus.Active && invitation.GroupNameSnapshot != null)
+            .OrderByDescending(invitation => invitation.CreatedAtUtc)
+            .Select(invitation => invitation.GroupNameSnapshot)
+            .FirstOrDefaultAsync(ct);
+        var attempt = Attempt.Create(assignment.Id, number, Now, profileId, NameOf(profile), groupSnapshot,
+            grantId, variant?.Id, assignment.MaxAttempts);
         attempt.Start(Now, Seconds(assignment.AttemptTotalTimeLimitSeconds));
         db.Attempts.Add(attempt);
-        await db.SaveChangesAsync(ct);
-        await EnsureSessionsAsync(attempt, testVersion, variant, ct);
+        // Порядок вопросов попытки — из зафиксированного варианта (ТЗ §8); без вариантов — порядок версии.
+        var order = 0;
+        foreach (var questionVersionId in variant?.QuestionOrder ?? testVersion.QuestionVersionIds)
+            db.QuestionSessions.Add(QuestionSession.Create(attempt.Id, questionVersionId, order++));
         return attempt;
     }
 
@@ -202,106 +297,159 @@ public sealed class StudentFlowService(ExamForgeDbContext db, TimeProvider timeP
         await db.SaveChangesAsync(ct);
     }
 
-    public async Task<AttemptStateDto> OpenNextAsync(Guid attemptId, StudentIdentity who, CancellationToken ct)
-    {
-        var attempt = await LoadOwnedAttemptAsync(attemptId, who, ct);
-        var now = Now;
-        if (attempt.State != AttemptState.InProgress)
-            throw StudentFlowException.Conflict("not_in_progress", "Попытка не активна.");
+    public Task<AttemptStateDto> OpenNextAsync(Guid attemptId, StudentIdentity who, CancellationToken ct)
+        => WithAttemptLockAsync(attemptId, who, attempt => OpenNextCoreAsync(attempt, ct), ct);
 
-        var sessions = await LoadSessionsAsync(attempt.Id, ct);
-        var active = sessions.FirstOrDefault(s => s.State == QuestionSessionState.Active);
-        if (active is not null)
+    public Task<AttemptStateDto> AdvanceAsync(
+        Guid attemptId, AdvanceQuestionRequest request, StudentIdentity who, CancellationToken ct)
+        => WithAttemptLockAsync(attemptId, who, async attempt =>
         {
-            active.ExpireIfDue(now);
-            if (active.State == QuestionSessionState.Active)
+            if (IsSubmitted(attempt))
+                return await BuildStateAsync(attempt, ct);
+            EnsureInProgress(attempt);
+            var sessions = await LoadSessionsAsync(attempt.Id, ct);
+            var latest = sessions.LastOrDefault(session => session.StartedAtUtc is not null);
+            if (latest?.Id != request.QuestionSessionId)
+                return await BuildStateAsync(attempt, ct);
+
+            if (request.Answer is { } answer)
             {
-                await db.SaveChangesAsync(ct); // возможен переход в TimedOut выше
+                if (answer.QuestionSessionId != latest.Id)
+                    throw StudentFlowException.NotFound("Вопрос не найден.");
+                await RecordAnswerAsync(attempt, latest, answer, Now, ct);
+            }
+
+            latest.Lock(Now);
+            if (sessions.All(session => session.State != QuestionSessionState.NotOpened))
+            {
+                await FinishCoreAsync(attempt, sessions, Now, ct);
                 return await BuildStateAsync(attempt, ct);
             }
-            await db.SaveChangesAsync(ct);
+
+            return await OpenNextCoreAsync(attempt, ct);
+        }, ct);
+
+    private async Task<AttemptStateDto> OpenNextCoreAsync(Attempt attempt, CancellationToken ct)
+    {
+        if (IsSubmitted(attempt))
+            return await BuildStateAsync(attempt, ct);
+        EnsureInProgress(attempt);
+
+        var now = Now;
+        var assignment = await LoadAssignmentTimingAsync(attempt.AssignmentId, ct);
+        var sessions = await LoadSessionsAsync(attempt.Id, ct);
+        if (WorkDeadline(attempt, assignment.ClosesAtUtc) is { } deadline && now >= deadline)
+        {
+            await FinishCoreAsync(attempt, sessions, now, ct);
+            return await BuildStateAsync(attempt, ct);
         }
 
-        // Скрытая вкладка не запускает таймеры будущих вопросов: открываем ровно один следующий (ТЗ §10.2).
-        var next = sessions.Where(s => s.State == QuestionSessionState.NotOpened).OrderBy(s => s.OrderIndex).FirstOrDefault();
-        if (next is null)
-            throw StudentFlowException.Conflict("no_next_question", "Доступных вопросов нет: завершите попытку.");
+        var active = sessions.FirstOrDefault(session => session.State == QuestionSessionState.Active);
+        active?.ExpireIfDue(now);
+        if (active?.State == QuestionSessionState.Active)
+            return await BuildStateAsync(attempt, ct);
 
-        var (assignment, testVersion) = await LoadAssignmentWithVersionAsync(attempt.AssignmentId, who, ct);
-        var questionVersion = await db.QuestionVersions.AsNoTracking()
-            .SingleAsync(v => v.Id == next.QuestionVersionId, ct);
-
-        var perQuestion = assignment.PerQuestionTimeLimitSeconds ?? questionVersion.ProposedTimeLimitSeconds;
-        next.Open(now, Seconds(perQuestion), attempt.DeadlineUtc, assignment.ClosesAtUtc);
+        var next = sessions.FirstOrDefault(session => session.State == QuestionSessionState.NotOpened)
+            ?? throw StudentFlowException.Conflict("no_next_question", "Все вопросы открыты. Сдайте работу.");
+        var proposedTime = await db.QuestionVersions.AsNoTracking()
+            .Where(version => version.Id == next.QuestionVersionId)
+            .Select(version => version.ProposedTimeLimitSeconds)
+            .SingleAsync(ct);
+        next.Open(now, Seconds(assignment.PerQuestionTimeLimitSeconds ?? proposedTime),
+            attempt.DeadlineUtc, assignment.ClosesAtUtc);
         await db.SaveChangesAsync(ct);
         return await BuildStateAsync(attempt, ct);
     }
 
-    public async Task<SaveAnswerDto> SaveAnswerAsync(
-        Guid attemptId, Guid questionSessionId, string answerJson, StudentIdentity who, CancellationToken ct)
-    {
-        var attempt = await LoadOwnedAttemptAsync(attemptId, who, ct);
-        var now = Now;
-        var session = await db.QuestionSessions
-            .SingleOrDefaultAsync(s => s.Id == questionSessionId && s.AttemptId == attempt.Id, ct)
-            ?? throw StudentFlowException.NotFound("Вопрос не найден.");
-
-        var decision = session.SaveAnswer(now);
-        if (decision != AnswerDecision.Accepted)
+    public Task<SaveAnswerDto> SaveAnswerAsync(
+        Guid attemptId, AttemptAnswer answer, StudentIdentity who, CancellationToken ct)
+        => WithAttemptLockAsync(attemptId, who, async attempt =>
         {
-            await db.SaveChangesAsync(ct); // фиксируем ленивое истечение срока
-            var reason = decision == AnswerDecision.RejectedLate
-                ? "Время истекло. Ответ не принят; ранее сохранённый вариант сохранён."   // ТЗ §10.1
-                : "Вопрос закрыт; изменить ответ нельзя (возврат запрещён).";              // AC-06
-            throw new StudentFlowException(409, decision == AnswerDecision.RejectedLate ? "late" : "not_active", reason)
-            {
-                // детали состояния включаются в ProblemDetails расширением
-            };
-        }
-
-        db.AnswerRevisions.Add(AnswerRevision.Create(session.Id, attempt.Id, session.AnswerRevision, answerJson, now));
-        try
-        {
+            EnsureInProgress(attempt);
+            var session = await db.QuestionSessions
+                .SingleOrDefaultAsync(s => s.Id == answer.QuestionSessionId && s.AttemptId == attempt.Id, ct)
+                ?? throw StudentFlowException.NotFound("Вопрос не найден.");
+            var now = Now;
+            await RecordAnswerAsync(attempt, session, answer, now, ct);
             await db.SaveChangesAsync(ct);
-        }
-        catch (DbUpdateException)
+
+            return new SaveAnswerDto(true, session.AnswerRevision, now, session.DeadlineUtc, StateName(session.State), null);
+        }, ct);
+
+    private async Task RecordAnswerAsync(
+        Attempt attempt, QuestionSession session, AttemptAnswer answer, DateTimeOffset now, CancellationToken ct)
+    {
+        if (session.State == QuestionSessionState.LockedTimedOut ||
+            (session.State == QuestionSessionState.Active && !session.CanAcceptAnswer(now)))
+            throw StudentFlowException.Conflict("late", "Время истекло. Последняя правка не принята сервером.");
+        if (session.State != QuestionSessionState.Active)
+            throw StudentFlowException.Conflict("not_active", "Вопрос закрыт, ответ сохранён в предыдущем состоянии.");
+
+        var definitionJson = await db.QuestionVersions.AsNoTracking()
+            .Where(version => version.Id == session.QuestionVersionId)
+            .Select(version => version.DefinitionJson)
+            .SingleAsync(ct);
+        QuestionAnswerValidator.Parse(QuestionDefinitionJson.Deserialize(definitionJson), answer.Answer);
+
+        if (answer.ExpectedRevision is { } expected && session.AnswerRevision != expected)
         {
-            // Гонка ревизий (два устройства): последним признаётся зафиксированный сервером порядок.
-            throw StudentFlowException.Conflict("revision_conflict", "Конфликт сохранения: обновите состояние и повторите.");
+            var saved = await db.AnswerRevisions.AsNoTracking()
+                .Where(revision => revision.QuestionSessionId == session.Id && revision.Revision == session.AnswerRevision)
+                .Select(revision => revision.AnswerJson)
+                .SingleOrDefaultAsync(ct);
+            if (saved is not null)
+            {
+                using var document = JsonDocument.Parse(saved);
+                if (JsonElement.DeepEquals(document.RootElement, answer.Answer))
+                    return; // Повтор ответа, подтверждение которого не дошло до клиента.
+            }
+
+            throw StudentFlowException.Conflict("revision_conflict",
+                "У вопроса есть более новый ответ. Проверьте другую вкладку или обновите страницу.");
         }
 
-        return new SaveAnswerDto(true, session.AnswerRevision, now, session.DeadlineUtc, StateName(session.State), null);
+        session.SaveAnswer(now);
+        db.AnswerRevisions.Add(AnswerRevision.Create(
+            session.Id, attempt.Id, session.AnswerRevision, answer.Answer.GetRawText(), now));
     }
 
-    public async Task<LockCurrentDto> LockCurrentAsync(Guid attemptId, StudentIdentity who, CancellationToken ct)
+    public Task<LockCurrentDto> LockCurrentAsync(Guid attemptId, StudentIdentity who, CancellationToken ct)
+        => WithAttemptLockAsync(attemptId, who, async attempt =>
+        {
+            EnsureInProgress(attempt);
+            var sessions = await LoadSessionsAsync(attempt.Id, ct);
+            var current = sessions.LastOrDefault(session => session.StartedAtUtc is not null)
+                ?? throw StudentFlowException.Conflict("no_active_question", "Сначала откройте вопрос.");
+            var outcome = current.Lock(Now);
+            await db.SaveChangesAsync(ct);
+            return new LockCurrentDto(outcome.ToString(), current.OrderIndex, StateName(current.State));
+        }, ct);
+
+    public Task<FinishAttemptDto> FinishAsync(
+        Guid attemptId, AttemptAnswer? answer, StudentIdentity who, CancellationToken ct)
+        => WithAttemptLockAsync(attemptId, who, async attempt =>
+        {
+            if (IsSubmitted(attempt))
+                return ToFinishDto(attempt);
+
+            EnsureInProgress(attempt);
+            var now = Now;
+            var sessions = await LoadSessionsAsync(attempt.Id, ct);
+            if (answer is not null)
+            {
+                var session = sessions.SingleOrDefault(item => item.Id == answer.QuestionSessionId)
+                    ?? throw StudentFlowException.NotFound("Вопрос не найден.");
+                await RecordAnswerAsync(attempt, session, answer, now, ct);
+            }
+
+            return await FinishCoreAsync(attempt, sessions, now, ct);
+        }, ct);
+
+    private async Task<FinishAttemptDto> FinishCoreAsync(
+        Attempt attempt, IReadOnlyList<QuestionSession> sessions, DateTimeOffset now, CancellationToken ct)
     {
-        var attempt = await LoadOwnedAttemptAsync(attemptId, who, ct);
-        var now = Now;
-        var sessions = await LoadSessionsAsync(attempt.Id, ct);
-
-        var current = sessions
-            .Where(s => s.State == QuestionSessionState.Active || s.StartedAtUtc != null)
-            .OrderByDescending(s => s.OrderIndex)
-            .FirstOrDefault(s => s.State == QuestionSessionState.Active)
-            ?? throw StudentFlowException.Conflict("no_active_question", "Активного вопроса нет: откройте следующий.");
-
-        var outcome = current.Lock(now);
+        // Команда перехода может принять последнюю правку. Грейдер читает её в той же транзакции.
         await db.SaveChangesAsync(ct);
-        return new LockCurrentDto(outcome.ToString(), current.OrderIndex, StateName(current.State));
-    }
-
-    public async Task<FinishAttemptDto> FinishAsync(Guid attemptId, StudentIdentity who, CancellationToken ct)
-    {
-        var attempt = await LoadOwnedAttemptAsync(attemptId, who, ct);
-        var now = Now;
-
-        if (attempt.State is AttemptState.Submitted or AttemptState.PendingReview or AttemptState.Finalized)
-            return ToFinishDto(attempt); // идемпотентность (AC-07)
-
-        if (attempt.State != AttemptState.InProgress)
-            throw StudentFlowException.Conflict("not_in_progress", "Попытку нельзя завершить в текущем состоянии.");
-
-        var sessions = await LoadSessionsAsync(attempt.Id, ct);
         foreach (var session in sessions)
         {
             session.ExpireIfDue(now);
@@ -327,7 +475,7 @@ public sealed class StudentFlowService(ExamForgeDbContext db, TimeProvider timeP
                 throw new StudentFlowException(500, "version_missing", "Версия вопроса не найдена; обратитесь к преподавателю.");
             var definition = QuestionDefinitionJson.Deserialize(version.DefinitionJson);
             var answer = lastRevisions.TryGetValue(session.Id, out var revision)
-                ? QuestionDefinitionJson.DeserializeAnswer(revision.AnswerJson)
+                ? await ReadStoredAnswerAsync(revision, ct)
                 : null;
             var outcome = AnswerGrader.Grade(definition, answer);
             earned += outcome.EarnedPoints;
@@ -368,6 +516,14 @@ public sealed class StudentFlowService(ExamForgeDbContext db, TimeProvider timeP
             throw StudentFlowException.Conflict("not_finished", "Попытка ещё не завершена.");
 
         var score = attempt.Score;
+        IReadOnlyList<StudentQuestionFeedbackDto>? feedback = null;
+        if (attempt.State == AttemptState.Finalized &&
+            await db.Assignments.AsNoTracking().AnyAsync(assignment => assignment.Id == attempt.AssignmentId &&
+                assignment.Feedback == FeedbackPolicy.PracticeFeedback, ct))
+        {
+            feedback = await LoadPracticeFeedbackAsync(attempt.Id, ct);
+        }
+
         return new StudentResultDto(
             attempt.State.ToString(),
             Provisional: attempt.State != AttemptState.Finalized,
@@ -375,23 +531,109 @@ public sealed class StudentFlowService(ExamForgeDbContext db, TimeProvider timeP
             MaxPoints: score?.MaxPoints ?? 0m,
             RoundedPercent: score?.RoundedPercent,
             CompletedAtUtc: attempt.CompletedAtUtc,
-            attempt.AttemptNumber);
+            attempt.AttemptNumber,
+            feedback);
     }
 
-    public async Task<AttemptStateDto> GetStateAsync(Guid attemptId, StudentIdentity who, CancellationToken ct)
+    private async Task<IReadOnlyList<StudentQuestionFeedbackDto>> LoadPracticeFeedbackAsync(Guid attemptId, CancellationToken ct)
     {
-        var attempt = await LoadOwnedAttemptAsync(attemptId, who, ct);
-        var now = Now;
-        var active = await db.QuestionSessions.FirstOrDefaultAsync(
-            s => s.AttemptId == attempt.Id && s.State == QuestionSessionState.Active, ct);
-        if (active is not null)
-        {
-            active.ExpireIfDue(now);
-            if (active.State != QuestionSessionState.Active)
-                await db.SaveChangesAsync(ct);
-        }
-        return await BuildStateAsync(attempt, ct);
+        var points = from grade in db.QuestionGrades.AsNoTracking()
+                     where grade.AttemptId == attemptId
+                     group grade by grade.QuestionSessionId into session
+                     select new { Id = session.Key, Earned = session.Sum(row => row.EarnedPoints), Max = session.Sum(row => row.MaxPoints) };
+        var items = await (from session in db.QuestionSessions.AsNoTracking()
+                           join version in db.QuestionVersions.AsNoTracking() on session.QuestionVersionId equals version.Id
+                           join score in points on session.Id equals score.Id
+                           where session.AttemptId == attemptId
+                           orderby session.OrderIndex
+                           select new { session.OrderIndex, session.AnswerRevision, version.DefinitionJson, score.Earned, score.Max })
+            .ToListAsync(ct);
+        return [.. items.Select(item => new StudentQuestionFeedbackDto(item.OrderIndex + 1,
+            QuestionDefinitionJson.Deserialize(item.DefinitionJson).Prompt, item.Earned, item.Max, item.AnswerRevision > 0))];
     }
+
+    public Task<AttemptStateDto> GetStateAsync(Guid attemptId, StudentIdentity who, CancellationToken ct)
+        => WithAttemptLockAsync(attemptId, who, async attempt =>
+        {
+            if (attempt.State == AttemptState.InProgress)
+            {
+                var now = Now;
+                var assignment = await LoadAssignmentTimingAsync(attempt.AssignmentId, ct);
+                var sessions = await LoadSessionsAsync(attempt.Id, ct);
+                if (WorkDeadline(attempt, assignment.ClosesAtUtc) is { } deadline && now >= deadline)
+                    await FinishCoreAsync(attempt, sessions, now, ct);
+                else if (sessions.FirstOrDefault(session => session.State == QuestionSessionState.Active)?.ExpireIfDue(now) == true)
+                    await db.SaveChangesAsync(ct);
+            }
+            return await BuildStateAsync(attempt, ct);
+        }, ct);
+
+    private async Task<T> WithAttemptLockAsync<T>(
+        Guid attemptId, StudentIdentity who, Func<Attempt, Task<T>> operation, CancellationToken ct)
+        => await db.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        {
+            db.ChangeTracker.Clear();
+            await using var transaction = await db.Database.BeginTransactionAsync(ct);
+            // Все переходы одной попытки получают блокировку до чтения сессий и ответов.
+            var attempt = await db.Attempts
+                .FromSql($"""SELECT attempts.*, xmin FROM attempts WHERE "Id" = {attemptId} FOR UPDATE""")
+                .SingleOrDefaultAsync(a => a.StudentProfileId == who.StudentProfileId &&
+                    (who.AssignmentId == null || a.AssignmentId == who.AssignmentId), ct)
+                ?? throw StudentFlowException.NotFound();
+            var result = await operation(attempt);
+            await transaction.CommitAsync(ct);
+            return result;
+        });
+
+    private async Task<QuestionAnswer?> ReadStoredAnswerAsync(AnswerRevision latest, CancellationToken ct)
+    {
+        if (TryReadStoredAnswer(latest) is { } answer)
+            return answer;
+
+        var earlier = await db.AnswerRevisions.AsNoTracking()
+            .Where(revision => revision.QuestionSessionId == latest.QuestionSessionId &&
+                revision.Revision < latest.Revision)
+            .OrderByDescending(revision => revision.Revision)
+            .ToListAsync(ct);
+        return earlier.Select(TryReadStoredAnswer).FirstOrDefault(answer => answer is not null);
+    }
+
+    private QuestionAnswer? TryReadStoredAnswer(AnswerRevision revision)
+    {
+        try
+        {
+            return QuestionDefinitionJson.DeserializeAnswer(revision.AnswerJson);
+        }
+        catch (DomainException)
+        {
+            logger.LogWarning("Ignoring invalid stored answer {AnswerId} in attempt {AttemptId}",
+                revision.Id, revision.AttemptId);
+            return null;
+        }
+    }
+
+    private static bool IsSubmitted(Attempt attempt)
+        => attempt.State is AttemptState.Submitted or AttemptState.PendingReview or AttemptState.Finalized;
+
+    private static void EnsureInProgress(Attempt attempt)
+    {
+        if (attempt.State != AttemptState.InProgress)
+            throw StudentFlowException.Conflict("not_in_progress", "Попытка уже закрыта или ещё не началась.");
+    }
+
+    private async Task<AssignmentTiming> LoadAssignmentTimingAsync(Guid assignmentId, CancellationToken ct)
+        => await (from assignment in db.Assignments.AsNoTracking()
+                  join version in db.TestVersions.AsNoTracking() on assignment.TestVersionId equals version.Id
+                  where assignment.Id == assignmentId
+                  select new AssignmentTiming(assignment.ClosesAtUtc, assignment.PerQuestionTimeLimitSeconds, version.Title))
+            .SingleAsync(ct);
+
+    private static DateTimeOffset? WorkDeadline(Attempt attempt, DateTimeOffset? closesAtUtc)
+        => closesAtUtc is { } closes && (attempt.DeadlineUtc is null || closes < attempt.DeadlineUtc)
+            ? closes
+            : attempt.DeadlineUtc;
+
+    private sealed record AssignmentTiming(DateTimeOffset? ClosesAtUtc, int? PerQuestionTimeLimitSeconds, string Title);
 
     // ---------- Вспомогательное ----------
 
@@ -448,79 +690,41 @@ public sealed class StudentFlowService(ExamForgeDbContext db, TimeProvider timeP
             var variant = attempt.VariantId is null
                 ? null
                 : await db.Variants.AsNoTracking().SingleOrDefaultAsync(v => v.Id == attempt.VariantId, ct);
-            current = await ProjectQuestionAsync(active, variant, ct);
+            // P0-05: после F5/reconnect студент продолжает со своего последнего сохранённого
+            // ответа; DTO отдаёт только собственную ревизию, ключей в ней нет (AC-11).
+            string? savedAnswerJson = null;
+            if (active.AnswerRevision > 0)
+                savedAnswerJson = await db.AnswerRevisions.AsNoTracking()
+                    .Where(r => r.QuestionSessionId == active.Id && r.Revision == active.AnswerRevision)
+                    .Select(r => r.AnswerJson)
+                    .FirstOrDefaultAsync(ct);
+            current = await ProjectQuestionAsync(active, variant, savedAnswerJson, ct);
         }
 
+        var assignment = await LoadAssignmentTimingAsync(attempt.AssignmentId, ct);
         return new AttemptStateDto(
             attempt.Id,
             attempt.State.ToString(),
             attempt.AttemptNumber,
             attempt.StartedAtUtc,
-            attempt.DeadlineUtc,
+            WorkDeadline(attempt, assignment.ClosesAtUtc),
             sessions.Count,
             sessions.Select(s => new SessionBriefDto(s.OrderIndex, StateName(s.State), s.AnswerRevision, s.DeadlineUtc)).ToList(),
-            current);
+            current,
+            Now,
+            assignment.Title);
     }
 
     /// <summary>Проекция без ключей: CorrectOptionId/ключи/объяснения не сериализуются (AC-11).
     /// Порядок отображаемых списков — по варианту попытки (ТЗ §8).</summary>
-    private async Task<StudentQuestionDto> ProjectQuestionAsync(QuestionSession session, Domain.Testing.Variant? variant, CancellationToken ct)
+    private async Task<StudentQuestionDto> ProjectQuestionAsync(
+        QuestionSession session, Domain.Testing.Variant? variant, string? savedAnswerJson, CancellationToken ct)
     {
         var version = await db.QuestionVersions.AsNoTracking().SingleAsync(v => v.Id == session.QuestionVersionId, ct);
         var definition = QuestionDefinitionJson.Deserialize(version.DefinitionJson);
 
-        IReadOnlyList<StudentOptionDto>? options = null;
-        IReadOnlyList<StudentTileDto>? tiles = null;
-        IReadOnlyList<StudentOptionDto>? left = null, right = null, items = null, fields = null;
-        IReadOnlyList<string>? blanks = null;
-
-        switch (definition.Type)
-        {
-            case QuestionType.SingleChoice:
-            case QuestionType.MultipleChoice:
-                options = OrderOptions(variant, version.Id,
-                    [.. definition.Options.Select(o => new StudentOptionDto(o.OptionId, o.Text))], o => o.Id);
-                break;
-            case QuestionType.Matching:
-                left = [.. definition.MatchingPairs.Select(p => new StudentOptionDto(p.LeftId, p.LeftText))];
-                right = OrderOptions(variant, version.Id,
-                    [.. definition.MatchingPairs.Select(p => new StudentOptionDto(p.RightId, p.RightText))], o => o.Id);
-                break;
-            case QuestionType.LetterAssembly:
-                tiles = OrderTiles(variant, version.Id,
-                    [.. definition.LetterTiles.Select(t => new StudentTileDto(t.TileId, t.Letter))]);
-                break;
-            case QuestionType.Ordering:
-                items = [.. definition.OrderingItems.Select(o => new StudentOptionDto(o.OptionId, o.Text))];
-                break;
-            case QuestionType.Structured:
-                fields = [.. definition.StructuredFields.Select(f => new StudentOptionDto(f.FieldId, f.Label))];
-                break;
-            case QuestionType.GapFill:
-                blanks = [.. definition.GapBlanks.Select(b => b.BlankId)];
-                break;
-        }
-
-        return new StudentQuestionDto(
-            session.Id, version.Id, session.OrderIndex, definition.Type.ToString(), definition.Prompt, definition.Instruction,
-            version.ProposedTimeLimitSeconds, options, tiles, left, right, items, fields, blanks);
-    }
-
-    private static IReadOnlyList<StudentOptionDto> OrderOptions(
-        Domain.Testing.Variant? variant, Guid questionVersionId,
-        IReadOnlyList<StudentOptionDto> source, Func<StudentOptionDto, string> idOf)
-        => variant is null ? source : Reordered(variant, questionVersionId, source, idOf);
-
-    private static IReadOnlyList<StudentTileDto> OrderTiles(
-        Domain.Testing.Variant? variant, Guid questionVersionId, IReadOnlyList<StudentTileDto> source)
-        => variant is null ? source : Reordered(variant, questionVersionId, source, t => t.TileId);
-
-    private static IReadOnlyList<T> Reordered<T>(
-        Domain.Testing.Variant variant, Guid questionVersionId, IReadOnlyList<T> source, Func<T, string> idOf)
-    {
-        var byId = source.ToDictionary(idOf);
-        var ordered = variant.OrderFor(questionVersionId, [.. byId.Keys]);
-        return ordered.Where(byId.ContainsKey).Select(id => byId[id]).ToList();
+        return StudentQuestionProjection.Create(session.Id, version.Id, session.OrderIndex, definition,
+            version.ProposedTimeLimitSeconds, variant, savedAnswerJson);
     }
 
     private static TimeSpan? Seconds(int? seconds) => seconds is { } s ? TimeSpan.FromSeconds(s) : null;

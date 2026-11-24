@@ -13,6 +13,7 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" />
     <PackageReference Include="PdfPig" />
+    <PackageReference Include="FluentAssertions" />
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio" />
   </ItemGroup>
@@ -24,6 +25,8 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\ExamForge.Domain\ExamForge.Domain.csproj" />
     <ProjectReference Include="..\..\src\ExamForge.Application\ExamForge.Application.csproj" />
+    <!-- Клиентские (WASM) утилиты student-flow тестируются тоже: countdown и т.п. -->
+    <ProjectReference Include="..\..\src\ExamForge.Web.Client\ExamForge.Web.Client.csproj" />
   </ItemGroup>
 
 </Project>

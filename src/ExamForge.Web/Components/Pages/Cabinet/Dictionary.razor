@@ -303,7 +303,7 @@
         {
             await DictionaryService.DeleteEntryAsync(await ActorAsync(), entryId, CancellationToken.None);
             _confirmDeleteEntryId = null;
-            _entries[dictionaryId] = [.. await DictionaryService.EntriesAsync(dictionaryId, CancellationToken.None)];
+            _entries[dictionaryId] = [.. await DictionaryService.EntriesAsync(await ActorAsync(), dictionaryId, CancellationToken.None)];
             await ReloadAsync();
         }
         catch (Exception ex) { _error = ex.Message; _confirmDeleteEntryId = null; }
@@ -320,7 +320,7 @@
                 NullIfEmpty(EntryForm.FormKind), NullIfEmpty(EntryForm.Gender), NullIfEmpty(EntryForm.Declension),
                 CancellationToken.None);
             EntryForm = new ManualEntryForm();
-            _entries[dictionaryId] = [.. await DictionaryService.EntriesAsync(dictionaryId, CancellationToken.None)];
+            _entries[dictionaryId] = [.. await DictionaryService.EntriesAsync(await ActorAsync(), dictionaryId, CancellationToken.None)];
             await ReloadAsync();
         }
         catch (Exception ex) { _error = ex.Message; }
@@ -338,7 +338,7 @@
             .Select(s => (s.Id, s.Name)));
         CreateForm.SubjectId ??= _subjects.FirstOrDefault().Id;
         _dictionaries.Clear();
-        _dictionaries.AddRange(await DictionaryService.ListAsync(CancellationToken.None));
+        _dictionaries.AddRange(await DictionaryService.ListAsync(await ActorAsync(), CancellationToken.None));
     }
 
     private void ImportFileSelected(InputFileChangeEventArgs e) => _importFile = e.File;
@@ -374,14 +374,14 @@
                 await ActorAsync(), dictionaryId, stream, CancellationToken.None);
             _importResult = $"Импортировано {imported} черновиков, пропущено строк: {skipped}. Всё — на проверку.";
             _importFile = null;
-            _entries[dictionaryId] = [.. await DictionaryService.EntriesAsync(dictionaryId, CancellationToken.None)];
+            _entries[dictionaryId] = [.. await DictionaryService.EntriesAsync(await ActorAsync(), dictionaryId, CancellationToken.None)];
         }
         catch (Exception ex) { _error = ex.Message; }
         finally { _busy = false; }
     }
 
     private async Task ToggleEntriesAsync(Guid dictionaryId)
-        => _entries[dictionaryId] = [.. await DictionaryService.EntriesAsync(dictionaryId, CancellationToken.None)];
+        => _entries[dictionaryId] = [.. await DictionaryService.EntriesAsync(await ActorAsync(), dictionaryId, CancellationToken.None)];
 
     private async Task ConfirmAsync(Guid dictionaryId, DictionaryEntryDto entry)
     {
@@ -392,7 +392,7 @@
             // (детальная форма признаков — форма страницы; пустые признаки => NeedsReview снимается при явном подтверждении).
             await DictionaryService.ConfirmAsync(await ActorAsync(), entry.EntryId,
                 null, null, null, null, entry.Translations, CancellationToken.None);
-            _entries[dictionaryId] = [.. await DictionaryService.EntriesAsync(dictionaryId, CancellationToken.None)];
+            _entries[dictionaryId] = [.. await DictionaryService.EntriesAsync(await ActorAsync(), dictionaryId, CancellationToken.None)];
         }
         catch (Exception ex) { _error = ex.Message; }
     }
@@ -400,7 +400,7 @@
     private async Task RejectAsync(Guid dictionaryId, Guid entryId)
     {
         await DictionaryService.RejectAsync(await ActorAsync(), entryId, CancellationToken.None);
-        _entries[dictionaryId] = [.. await DictionaryService.EntriesAsync(dictionaryId, CancellationToken.None)];
+        _entries[dictionaryId] = [.. await DictionaryService.EntriesAsync(await ActorAsync(), dictionaryId, CancellationToken.None)];
     }
 
     private async Task DraftQuestionAsync(Guid dictionaryId, Guid entryId)

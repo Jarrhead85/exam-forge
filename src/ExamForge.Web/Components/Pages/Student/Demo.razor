@@ -1,0 +1,32 @@
+@page "/demo"
+@rendermode InteractiveServer
+@using ExamForge.Domain.Questions
+@using ExamForge.Infrastructure.Services
+
+<PageTitle>Пример теста — Exam Forge</PageTitle>
+
+<PreviewRunner Plan="_demo" Description="Три задания по медицинской латыни. Код и аккаунт не нужны." />
+
+@code {
+    private readonly ExamPreviewPlan _demo = new("Медицинская латынь", [
+        Question("Что означает термин «oculus»?", ["Глаз", "Ухо", "Нос"], "a"),
+        Question("Что означает термин «auris»?", ["Рука", "Ухо", "Голова"], "b"),
+        Question("Что означает термин «nasus»?", ["Зуб", "Язык", "Нос"], "c"),
+    ], null, 60, 180);
+
+    private static PreviewQuestion Question(string prompt, string[] choices, string correct)
+    {
+        var definition = new QuestionDefinition
+        {
+            Type = QuestionType.SingleChoice,
+            Prompt = prompt,
+            Options = [.. choices.Select((choice, index) => new OptionDef(((char)('a' + index)).ToString(), choice))],
+            CorrectOptionId = correct,
+            MaxPoints = 1,
+            ProposedTimeLimitSeconds = 60,
+        };
+        var version = QuestionVersion.Create(Guid.NewGuid(), 1, definition.Type,
+            QuestionDefinitionJson.Serialize(definition), 1, 1, 60, DateTimeOffset.UtcNow);
+        return new PreviewQuestion(version, definition);
+    }
+}

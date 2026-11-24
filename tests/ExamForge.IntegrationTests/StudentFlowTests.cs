@@ -1,4 +1,4 @@
-﻿using System.Net;
+using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using ExamForge.Domain.Access;
@@ -571,5 +571,135 @@ public sealed class StudentFlowTests(ExamForgeWebFactory factory)
         factory.FakeTime.Advance(TimeSpan.FromMinutes(20)); // назначение закрылось после обмена
         var response = await client.PostAsJsonAsync($"/api/assignments/{seed.Assignment.Id}/attempts", new { });
         Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+    }
+
+    // ---------- P0-07: гонка параллельных Start ----------
+
+    [Fact]
+    public async Task TenParallelStarts_SingleActiveAttempt_AllGetSameAttempt()
+    {
+        // 10 параллельных start одного студента: ровно одна активная попытка,
+        // все запросы получают один и тот же attemptId без 500 (P0-07).
+        var seed = await SeedAsync();
+        var client = await ExchangedClientAsync(seed.StudentCode);
+
+        var starts = await Task.WhenAll(Enumerable.Range(0, 10)
+            .Select(_ => client.PostAsync($"/api/assignments/{seed.Assignment.Id}/attempts",
+                JsonContent.Create(new { }, options: Json))));
+        foreach (var start in starts.AsSpan())
+            Assert.True(start.IsSuccessStatusCode, $"start → {(int)start.StatusCode}");
+
+        var attemptIds = await Task.WhenAll(starts.Select(async s =>
+        {
+            var body = await s.Content.ReadFromJsonAsync<JsonElement>(Json);
+            return body.GetProperty("attemptId").GetGuid();
+        }));
+        Assert.All(attemptIds, id => Assert.Equal(attemptIds[0], id));
+
+        await using var db = NewDb();
+        var attempts = await db.Attempts.AsNoTracking()
+            .Where(a => a.AssignmentId == seed.Assignment.Id && a.StudentProfileId == seed.Student.Id)
+            .ToListAsync();
+        var active = attempts.Where(a => a.State is AttemptState.Created or AttemptState.InProgress).ToList();
+        Assert.Single(active);
+        Assert.Single(attempts); // вторая попытка после отката первого финиша не создавалась
+        var sessions = await db.QuestionSessions.AsNoTracking()
+            .Where(s => s.AttemptId == attemptIds[0]).ToListAsync();
+        Assert.Equal(3, sessions.Count); // Attempt + QuestionSessions атомарно (P0-07)
+    }
+
+    // ---------- P0-04: явное сохранение перед Next/Finish ----------
+
+    [Fact]
+    public async Task SaveAnswer_ThenImmediateLock_AnswerPersists()
+    {
+        // «Ответ → сразу Далее» (клиент делает явный SaveNow перед lock-current):
+        // ревизия, подтверждённая до lock, не теряется.
+        var seed = await SeedAsync();
+        var client = await ExchangedClientAsync(seed.StudentCode);
+        var attemptId = await StartAttemptAsync(client, seed.Assignment.Id);
+        var sessionId = await CurrentSessionIdAsync(client, attemptId);
+
+        var save = await client.PutAsJsonAsync($"/api/attempts/{attemptId}/answers/{sessionId}",
+            new { answer = new { selectedOptionId = "a" } });
+        save.EnsureSuccessStatusCode();
+        Assert.Equal(1, (await BodyAsync(save)).GetProperty("acceptedRevision").GetInt32());
+
+        // Немедленный lock без повторного сохранения (клиент не ждёт debounce).
+        var lockResponse = await client.PostAsJsonAsync($"/api/attempts/{attemptId}/lock-current", new { });
+        lockResponse.EnsureSuccessStatusCode();
+
+        var state = await GetJsonAsync(client, $"/api/attempts/{attemptId}/state");
+        var locked = state.GetProperty("sessions")[0];
+        Assert.Equal(1, locked.GetProperty("revision").GetInt32());
+        Assert.Equal("LockedSubmitted", locked.GetProperty("state").GetString());
+    }
+
+    [Fact]
+    public async Task Finish_ImmediatelyAfterSave_GradesSavedAnswer()
+    {
+        // «Ответ → сразу Завершить» без промежуточного lock-current:
+        // последняя подтверждённая ревизия учитывается при финальной оценке.
+        var seed = await SeedAsync();
+        var client = await ExchangedClientAsync(seed.StudentCode);
+        var attemptId = await StartAttemptAsync(client, seed.Assignment.Id);
+        var sessionId = await CurrentSessionIdAsync(client, attemptId);
+
+        var save = await client.PutAsJsonAsync($"/api/attempts/{attemptId}/answers/{sessionId}",
+            new { answer = new { selectedOptionId = "a" } });
+        save.EnsureSuccessStatusCode();
+
+        var finish = await client.PostAsJsonAsync($"/api/attempts/{attemptId}/finish", new { });
+        finish.EnsureSuccessStatusCode();
+        var finished = await BodyAsync(finish);
+        Assert.Equal("Finalized", finished.GetProperty("status").GetString());
+        // Один вопрос из трёх отвечен верно (1 из 6) — именно сохранённая ревизия учтена.
+        Assert.Equal(1m, finished.GetProperty("earnedPoints").GetDecimal());
+    }
+
+    [Fact]
+    public async Task ReloadState_RestoresSavedAnswer_WithoutKeys()
+    {
+        // P0-05: F5 → GetState возвращает собственный сохранённый ответ студента,
+        // чтобы редактор открылся восстановленным; ключей и оценивания в payload нет (AC-11).
+        var seed = await SeedAsync();
+        var client = await ExchangedClientAsync(seed.StudentCode);
+        var attemptId = await StartAttemptAsync(client, seed.Assignment.Id);
+        var sessionId = await CurrentSessionIdAsync(client, attemptId);
+
+        var save = await client.PutAsJsonAsync($"/api/attempts/{attemptId}/answers/{sessionId}",
+            new { answer = new { selectedOptionId = "a" } });
+        save.EnsureSuccessStatusCode();
+
+        var state = await GetJsonAsync(client, $"/api/attempts/{attemptId}/state");
+        var question = state.GetProperty("currentQuestion");
+        var savedJson = question.GetProperty("savedAnswerJson").GetString();
+        Assert.NotNull(savedJson);
+        using var doc = JsonDocument.Parse(savedJson!);
+        Assert.Equal("a", doc.RootElement.GetProperty("selectedOptionId").GetString());
+
+        // Восстановленный ответ не содержит ключей/оценивания (AC-11).
+        var raw = question.GetRawText().ToLowerInvariant();
+        Assert.DoesNotContain("correctoptionid", raw);
+        Assert.DoesNotContain("acceptedanswers", raw);
+        Assert.DoesNotContain("iscorrect", raw);
+        Assert.DoesNotContain("\"correct\"", raw);
+    }
+
+    [Fact]
+    public async Task ReloadState_NoSavedAnswer_OpensEmpty()
+    {
+        // P0-05: если ответа ещё нет — savedAnswerJson отсутствует (клиент открывает пустым)
+        // и пустое состояние не создаёт ревизию без действия пользователя.
+        var seed = await SeedAsync();
+        var client = await ExchangedClientAsync(seed.StudentCode);
+        var attemptId = await StartAttemptAsync(client, seed.Assignment.Id);
+        await OpenNextAsync(client, attemptId);
+
+        var state = await GetJsonAsync(client, $"/api/attempts/{attemptId}/state");
+        var question = state.GetProperty("currentQuestion");
+        Assert.False(question.TryGetProperty("savedAnswerJson", out _)
+            && question.GetProperty("savedAnswerJson").ValueKind is not JsonValueKind.Null);
+        Assert.Equal(0, state.GetProperty("sessions")[0].GetProperty("revision").GetInt32());
     }
 }

@@ -78,18 +78,18 @@ public class VariantGeneratorTests
     }
 
     [Fact]
-    public void Generate_VariantsDifferInOptionOrder()
+    public void Generate_ProducesDeterministicOrdersWithDistinctVariantSeeds()
     {
-        // Два варианта одной версии дают разные порядки опций (для 4 опций при фиксированном seed).
-        var id = Guid.NewGuid();
+        var id = Guid.Parse("7cee3fcc-5607-422e-a6d0-7be802849cc5");
         var version = Version(id);
         var definitions = new Dictionary<Guid, QuestionDefinition> { [id] = Choice(id, "a", "b", "c", "d") };
 
         var variants = VariantGenerator.Generate(version, definitions, 2, "seed-4", false, Now);
+        var repeated = VariantGenerator.Generate(version, definitions, 2, "seed-4", false, Now);
 
-        Assert.NotEqual(
-            variants[0].OptionOrders[id.ToString()],
-            variants[1].OptionOrders[id.ToString()]);
+        Assert.NotEqual(variants[0].Seed, variants[1].Seed);
+        Assert.Equal(variants[0].OptionOrders[id.ToString()], repeated[0].OptionOrders[id.ToString()]);
+        Assert.Equal(variants[1].OptionOrders[id.ToString()], repeated[1].OptionOrders[id.ToString()]);
     }
 
     [Fact]

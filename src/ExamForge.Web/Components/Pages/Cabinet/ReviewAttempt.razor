@@ -1,4 +1,4 @@
-﻿@page "/cabinet/reviews/{attemptId:guid}"
+@page "/cabinet/reviews/{attemptId:guid}"
 @layout Layout.TeacherLayout
 @attribute [Authorize]
 @* prerender: содержимое видно мгновенно; формы защищены submit-блокировщиком в App.razor *@
@@ -61,7 +61,7 @@ else
                     @if (criterion.State == "PendingManual" && _attempt.Status is "PendingReview" or "Submitted")
                     {
                         <input type="number" class="ef-input ef-input--score" min="0" max="@criterion.MaxPoints"
-                               step="0.5"
+                               step="any" aria-label="@($"Баллы · {criterion.Label}")"
                                @bind="_scores[(question.QuestionSessionId, criterion.CriterionId)]" />
                         <span>из @criterion.MaxPoints.ToString("0.##")</span>
                     }
@@ -70,7 +70,7 @@ else
                         <span class="ef-badge">@criterion.EarnedPoints.ToString("0.##") / @criterion.MaxPoints.ToString("0.##") · @criterion.State</span>
                         @if (_attempt.Status == "Finalized")
                         {
-                            <input type="number" class="ef-input ef-input--score" min="0" max="@criterion.MaxPoints" step="0.5"
+                            <input type="number" class="ef-input ef-input--score" min="0" max="@criterion.MaxPoints" step="any" aria-label="@($"Новые баллы · {criterion.Label}")"
                                    @bind="_overrides[(question.QuestionSessionId, criterion.CriterionId)]" />
                             <button class="ef-button ef-button--sm ef-button--quiet"
                                     @onclick="() => OverrideAsync(question.QuestionSessionId, criterion)">
@@ -84,11 +84,14 @@ else
     }
 
     <div class="ef-exam-actions">
-        <a class="ef-button ef-button--quiet" href="cabinet/reviews">К очереди</a>
+        <a class="ef-button ef-button--quiet" href="@($"cabinet/reviews?assignment={_attempt.AssignmentId}")">К очереди</a>
         @if (_attempt.Status is "PendingReview" or "Submitted")
         {
-            <button class="ef-button ef-button--primary" @onclick="SaveGradesAsync" disabled="@_busy">
-                Подтвердить оценку
+            <button class="ef-button ef-button--primary" @onclick="() => SaveGradesAsync(false)" disabled="@(_busy || !RendererInfo.IsInteractive)">
+                Сохранить оценку
+            </button>
+            <button class="ef-button ef-button--secondary" @onclick="() => SaveGradesAsync(true)" disabled="@(_busy || !RendererInfo.IsInteractive)">
+                Сохранить и перейти к следующей
             </button>
         }
     </div>
@@ -97,6 +100,9 @@ else
 @code {
     [Parameter] public Guid AttemptId { get; set; }
 
+    [SupplyParameterFromQuery(Name = "group")] public string? Group { get; set; }
+    [SupplyParameterFromQuery(Name = "question")] public Guid? QuestionVersionId { get; set; }
+
     private ReviewAttemptDto? _attempt;
     private string? _error;
     private bool _busy;
@@ -104,7 +110,7 @@ else
     private readonly Dictionary<(Guid, string), decimal?> _scores = [];
     private readonly Dictionary<(Guid, string), decimal?> _overrides = [];
 
-    protected override async Task OnInitializedAsync() => await ReloadAsync();
+    protected override async Task OnParametersSetAsync() => await ReloadAsync();
 
     private async Task ReloadAsync()
     {
@@ -135,7 +141,7 @@ else
             }
     }
 
-    private async Task SaveGradesAsync()
+    private async Task SaveGradesAsync(bool next)
     {
         _busy = true;
         _error = null;
@@ -153,9 +159,19 @@ else
                 _error = "Заполните баллы хотя бы одного критерия.";
                 return;
             }
-            _attempt = await Reviews.GradeAsync(await ActorAsync(), AttemptId, scores, CancellationToken.None);
+            var actor = await ActorAsync();
+            _attempt = await Reviews.GradeAsync(actor, AttemptId, scores, CancellationToken.None);
             InitScoreMaps();
             _saved = true;
+            if (next && _attempt.Status == "Finalized")
+            {
+                var queue = await Reviews.GetQueueAsync(actor, _attempt.AssignmentId, "pending", Group, QuestionVersionId,
+                    0, 1, CancellationToken.None);
+                Navigation.NavigateTo(queue.Count > 0
+                    ? $"cabinet/reviews/{queue[0].AttemptId}?group={Uri.EscapeDataString(Group ?? "")}" +
+                      (QuestionVersionId is { } question ? $"&question={question}" : "")
+                    : $"cabinet/reviews?assignment={_attempt.AssignmentId}");
+            }
         }
         catch (Exception ex)
         {

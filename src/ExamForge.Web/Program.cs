@@ -1,4 +1,4 @@
-﻿using System.Text.Encodings.Web;
+using System.Text.Encodings.Web;
 using System.Text.Unicode;
 using System.Threading.RateLimiting;
 using ExamForge.Domain.Access;
@@ -11,8 +11,11 @@ using ExamForge.Web.Authentication;
 using ExamForge.Web.Components;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Antiforgery;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -32,27 +35,25 @@ builder.Services.AddExamForgeInfrastructure(
         ?? throw new InvalidOperationException("ConnectionStrings:Default не задан."));
 
 builder.Services.AddSingleton(TimeProvider.System);
-builder.Services.AddSingleton(_ =>
-{
-    // HMAC-ключ проверки кодов приглашений (ADR-002); в production задаётся конфигурацией/секретом.
-    var keyHex = builder.Configuration["ExamForge:InvitationHmacKey"];
-    var key = string.IsNullOrWhiteSpace(keyHex)
-        ? Convert.FromHexString("5F1D2A7C94E80B3FA6C5D2E147B0899ADF23C6E501B7A4D8F9E0C3B2A1D4F7E6")
-        : Convert.FromHexString(keyHex);
-    return new InvitationCodeHasher(key);
-});
+builder.Services.AddSingleton(sp => HmacKeySetup.Create(
+    builder.Configuration["ExamForge:InvitationHmacKey"],
+    builder.Environment.IsProduction()));
 builder.Services.AddScoped<StudentFlowService>();
 builder.Services.AddScoped<TeacherAssignmentsService>();
 builder.Services.AddScoped<TestVersionService>();
+builder.Services.AddScoped<ExamPreviewService>();
 builder.Services.AddScoped<ManualReviewService>();
 builder.Services.AddScoped<PaperWorkService>();
 builder.Services.AddScoped<MaterialsService>();
 builder.Services.AddScoped<TeacherQuestionsService>();
 builder.Services.AddScoped<GroupService>();
+builder.Services.AddScoped<GroupInvitationService>();
+builder.Services.AddScoped<GroupRosterImportService>();
 builder.Services.AddScoped<DictionaryService>();
 builder.Services.AddScoped<SubjectsService>();
 builder.Services.AddScoped<AdminTeachersService>();
 builder.Services.AddScoped<ResultsService>();
+builder.Services.AddScoped<AssignmentAnalyticsService>();
 builder.Services.AddScoped<ExamForge.Application.Files.IFileStorage, ExamForge.Infrastructure.Files.LocalDiskFileStorage>();
 builder.Services.AddScoped<ExamForge.Infrastructure.Printing.PrintViewBuilder>();
 
@@ -95,19 +96,11 @@ builder.Services.AddAuthentication()
         options.Cookie.HttpOnly = true;
         options.Cookie.SameSite = SameSiteMode.Strict;
         options.Cookie.SecurePolicy = cookieSecure;
-            options.ExpireTimeSpan = TimeSpan.FromHours(8);
-            options.SlidingExpiration = false;
-        options.Events.OnRedirectToLogin = context =>
-        {
-            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-            return Task.CompletedTask;
-        };
-        options.Events.OnRedirectToAccessDenied = context =>
-        {
-            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-            return Task.CompletedTask;
-        };
+        options.ExpireTimeSpan = TimeSpan.FromHours(8);
+        options.SlidingExpiration = false;
+        options.EventsType = typeof(StudentCookieEvents);
     });
+builder.Services.AddScoped<StudentCookieEvents>();
 
 // Antiforgery для студенческого WASM: cookie + заголовок X-XSRF-TOKEN (ADR-002 п.5).
 builder.Services.AddAntiforgery(options =>
@@ -118,21 +111,43 @@ builder.Services.AddAntiforgery(options =>
     options.Cookie.SecurePolicy = cookieSecure;
 });
 
-// Ограничение перебора кодов приглашения: фиксированное окно по IP (ТЗ §5.2, §19).
-var exchangePerMinute = builder.Configuration.GetValue("ExamForge:RateLimits:ExchangePerMinute", 15);
+// Отдельные квоты входа учитывают общие IP аудиторий. Для аккаунта действует и блокировка логина.
+var exchangePerMinute = builder.Configuration.GetValue("ExamForge:RateLimits:ExchangePerMinute", 90);
+var webEntryPerMinute = builder.Configuration.GetValue("ExamForge:RateLimits:WebEntryPerMinute", 180);
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
-    options.AddPolicy("access-exchange", context =>
-        RateLimitPartition.GetFixedWindowLimiter(
-            context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
-            _ => new FixedWindowRateLimiterOptions
-            {
-                Window = TimeSpan.FromMinutes(1),
-                PermitLimit = exchangePerMinute,
-                QueueLimit = 0,
-            }));
+    foreach (var policy in new[] { "access-exchange", "access-link", "access-account" })
+        options.AddPolicy(policy, context => EntryLimiter(context, exchangePerMinute));
+
+    options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
+        HttpMethods.IsPost(context.Request.Method) && context.Request.Path == "/exam"
+            ? EntryLimiter(context, webEntryPerMinute)
+            : RateLimitPartition.GetNoLimiter("unlimited"));
+
+    options.OnRejected = async (rejected, ct) =>
+    {
+        if (rejected.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retry))
+            rejected.HttpContext.Response.Headers.RetryAfter =
+                ((int)Math.Ceiling(retry.TotalSeconds)).ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+        const string message = "Слишком много обращений. Подождите минуту и повторите вход.";
+        if (rejected.HttpContext.Request.Path.StartsWithSegments("/api"))
+            await rejected.HttpContext.Response.WriteAsJsonAsync(
+                new Microsoft.AspNetCore.Mvc.ProblemDetails { Status = 429, Title = message }, ct);
+        else
+            await rejected.HttpContext.Response.WriteAsync(message, ct);
+    };
 });
+
+static RateLimitPartition<string> EntryLimiter(HttpContext context, int limit)
+    => RateLimitPartition.GetFixedWindowLimiter(context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions
+        {
+            Window = TimeSpan.FromMinutes(1),
+            PermitLimit = limit,
+            QueueLimit = 0,
+        });
 
 // ControllersWithViews: регистрирует ValidateAntiforgeryTokenAuthorizationFilter для API-атрибутов.
 builder.Services.AddControllersWithViews();
@@ -142,9 +157,27 @@ builder.Services.AddControllersWithViews();
 builder.Services.AddScoped(_ => new HttpClient());
 builder.Services.AddScoped<ExamForge.Web.Client.Services.ExamApiClient>();
 builder.Services.AddHostedService<ExamForge.Web.StartupWarmupService>();
+builder.Services.AddHealthChecks().AddCheck<ExamForge.Web.DatabaseReadinessCheck>("database");
 
 var app = builder.Build();
 var antiforgery = app.Services.GetRequiredService<IAntiforgery>();
+
+// Fail-fast: конфигурация HMAC-ключа проверяется на старте приложения, а не при первом
+// обмене кодом приглашения (иначе production с плохой настройкой поднимался бы «на вид»).
+_ = app.Services.GetRequiredService<InvitationCodeHasher>();
+
+// За reverse proxy (nginx/Caddy на том же узле): восстанавливаем схему и IP клиента
+// из X-Forwarded-Proto / X-Forwarded-For, иначе HttpsRedirection, cookie SecurePolicy
+// и rate-limiter по IP работают неправильно. Middleware должен идти первым.
+// Очистка Known* допустима, потому что порт 8080 публикуется только на 127.0.0.1
+// и в docker-сети прокси — подделать заголовки извне нельзя.
+var forwarded = new ForwardedHeadersOptions
+{
+    ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto,
+};
+forwarded.KnownIPNetworks.Clear();
+forwarded.KnownProxies.Clear();
+app.UseForwardedHeaders(forwarded);
 
 // Утилиты одноразового запуска (деплой/разработка): применение миграций и сиды.
 if (args.Length >= 1)
@@ -165,6 +198,13 @@ if (args.Length >= 1)
     if (args.Length == 1 && args[0] == "--seed-demo")
     {
         await DemoSeeder.SeedAsync(app.Services);
+        return;
+    }
+    if (args.Length == 2 && args[0] == "--seed-e2e")
+    {
+        if (!app.Environment.IsDevelopment() && !app.Environment.IsEnvironment("Testing"))
+            throw new InvalidOperationException("Тестовые данные можно создавать только в Development или Testing.");
+        await ExamForge.Web.E2ESeeder.SeedAsync(app.Services, args[1]);
         return;
     }
 }
@@ -219,8 +259,8 @@ app.Use(async (context, next) =>
     {
         // Редкие падения RemoteNavigationManager.Initialize: фиксируем контекст запроса,
         // чтобы найти источник (заголовок Host / путь) по логам.
-        app.Logger.LogError(ex, "UriFormatException host='{Host}' path={Path} query={Query} proto={Proto}",
-            context.Request.Host.Value, context.Request.Path, context.Request.QueryString, context.Request.Protocol);
+        app.Logger.LogError(ex, "UriFormatException host='{Host}' path={Path} proto={Proto}",
+            context.Request.Host.Value, context.Request.Path, context.Request.Protocol);
         throw;
     }
     catch (ExamForge.Application.StudentFlow.StudentFlowException ex)
@@ -269,21 +309,31 @@ app.UseAuthentication();
 app.UseAuthorization();
 app.UseAntiforgery();
 
-// CSRF-защита teacher-API: любой POST/PUT/DELETE с учительской cookie обязан нести валидный
-// antiforgery-токен (заголовок X-XSRF-TOKEN). Студенческий API защищён [ValidateAntiForgeryToken]
-// на контроллерах и не зависит от этого middleware (ADR-002 п.5, §19).
+// Учительские API проверяют свой токен. Студенческие контроллеры используют свою схему и фильтры.
 app.Use(async (context, next) =>
 {
-    var isMutating = context.Request.Method is "POST" or "PUT" or "DELETE";
-    var hasTeacherCookie = context.Request.Cookies.ContainsKey("ef.teacher");
-    var isApiPath = context.Request.Path.StartsWithSegments("/api");
-    if (isMutating && hasTeacherCookie && isApiPath)
+    var isMutating = context.Request.Method is "POST" or "PUT" or "DELETE" or "PATCH";
+    var endpoint = context.GetEndpoint();
+    if (isMutating && context.Request.Path.StartsWithSegments("/api") &&
+        endpoint?.Metadata.GetMetadata<IAllowAnonymous>() is null &&
+        endpoint?.Metadata.GetMetadata<IAuthorizeData>() is { } authorization &&
+        authorization.AuthenticationSchemes != StudentAuth.Scheme &&
+        context.User.Identity?.IsAuthenticated == true &&
+        !await antiforgery.IsRequestValidAsync(context))
     {
-        await antiforgery.ValidateRequestAsync(context);
+        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+        await context.Response.WriteAsJsonAsync(new Microsoft.AspNetCore.Mvc.ProblemDetails
+        {
+            Status = 400,
+            Title = "Сессия формы устарела. Обновите страницу и повторите действие.",
+        });
+        return;
     }
     await next(context);
 });
 
+app.MapHealthChecks("/health/live", new HealthCheckOptions { Predicate = _ => false });
+app.MapHealthChecks("/health/ready");
 app.MapStaticAssets();
 // Браузеры запрашивают /favicon.ico — отдаём редирект на существующий png вместо
 // 404→re-execute /not-found (лишний SSR-рендер на каждый визит).
@@ -296,6 +346,44 @@ app.MapRazorComponents<App>()
 app.MapControllers();
 
 app.Run();
+
+/// <summary>
+/// HMAC-ключ кодов приглашений (ADR-002): production не запускается без явно заданного
+/// ключа; dev/Тестинг могут использовать явный fallback, закомментированный как таковой.
+/// Требование к ключу: 64 hex-символа = 32 байта, случайные (openssl rand -hex 32).
+/// </summary>
+internal static class HmacKeySetup
+{
+    public static InvitationCodeHasher Create(string? keyHex, bool isProduction)
+    {
+        if (string.IsNullOrWhiteSpace(keyHex))
+        {
+            if (isProduction)
+                throw new InvalidOperationException(
+                    "ExamForge:InvitationHmacKey не задан: production не может стартовать со встроенным fallback-ключом. " +
+                    "Задайте переменную окружения ExamForge__InvitationHmacKey: 64 hex-символа (32 байта), например `openssl rand -hex 32` (см. deploy/docker/env.example).");
+            // Специально помеченный dev-ключ: ТОЛЬКО вне production; у настоящих инстансов ключ
+            // свой — встроенный номер делал бы коды предсказуемыми.
+            keyHex = "5F1D2A7C94E80B3FA6C5D2E147B0899ADF23C6E501B7A4D8F9E0C3B2A1D4F7E6";
+        }
+
+        byte[] key;
+        try
+        {
+            key = Convert.FromHexString(keyHex);
+        }
+        catch (FormatException)
+        {
+            throw new InvalidOperationException("ExamForge:InvitationHmacKey должен быть hex-строкой без пробелов и посторонних символов.");
+        }
+
+        if (key.Length < 32)
+            throw new InvalidOperationException(
+                $"ExamForge:InvitationHmacKey должен быть не короче 32 байт (64 hex-символа); получено {key.Length} байт.");
+
+        return new InvitationCodeHasher(key);
+    }
+}
 
 internal static class AdminSeeder
 {

@@ -1,4 +1,4 @@
-﻿@page "/cabinet/results"
+@page "/cabinet/results"
 @layout Layout.TeacherLayout
 @attribute [Authorize]
 @* prerender: статистика видна сразу из SSR; форм нет. *@
@@ -8,6 +8,8 @@
 @using ExamForge.Infrastructure.Services
 @using Microsoft.AspNetCore.Identity
 @inject ResultsService ResultsService
+@inject AssignmentAnalyticsService Analytics
+@inject NavigationManager Navigation
 @inject TeacherAssignmentsService AssignmentsService
 @inject UserManager<TeacherUser> UserManager
 @inject AuthenticationStateProvider AuthState
@@ -15,68 +17,257 @@
 <PageTitle>Результаты — Exam Forge</PageTitle>
 
 <h1>Результаты</h1>
-<p class="ef-card__meta">
-    Статистика по назначениям с явными знаменателями. Описательная статистика — не доказательство знания темы.
-    Непроверенные работы показаны отдельно, не скрыты.
-</p>
-
-<div class="ef-form">
+@if (_assignments.Count == 0)
+{
+    <p class="ef-callout ef-callout--info">Ведомость появится после создания назначения.</p>
+    <a class="ef-button ef-button--primary" href="cabinet/assignments">Перейти к назначениям</a>
+}
+else
+{
     <div class="ef-field">
         <label for="res-assignment">Назначение</label>
-        <select id="res-assignment" @bind="_selectedAssignmentId" @bind:after="LoadStatsAsync">
-            <option value="">— выберите —</option>
-            @foreach (var a in _assignments)
+        <select id="res-assignment" @bind="_selectedAssignmentId" @bind:after="LoadResultsAsync">
+            @foreach (var assignment in _assignments)
             {
-                <option value="@a.AssignmentId">@a.TestTitle</option>
+                <option value="@assignment.AssignmentId">@assignment.TestTitle</option>
             }
         </select>
     </div>
-</div>
+}
 
-@if (_stats is not null)
+@if (_busy)
+{
+    <p role="status">Загружаем ведомость…</p>
+}
+else if (_error is not null)
+{
+    <p class="ef-form-error" role="alert">@_error</p>
+    <button class="ef-button ef-button--secondary" @onclick="LoadResultsAsync">Повторить загрузку</button>
+}
+else if (_stats is not null && _gradebook is not null)
 {
     <section class="ef-card" aria-labelledby="stats-title">
-        <h2 id="stats-title" class="ef-card__title">Сводка</h2>
-        <table class="ef-table">
-            <caption>Знаменатели указаны явно</caption>
-            <thead>
-                <tr><th scope="col">Показатель</th><th scope="col">Значение</th></tr>
-            </thead>
-            <tbody>
-                <tr><td>Приглашено студентов</td><td>@_stats.StudentsInvited</td></tr>
-                <tr><td>Попыток всего (онлайн)</td><td>@_stats.AttemptsTotal</td></tr>
-                <tr><td>Финализировано</td><td>@_stats.AttemptsFinalized</td></tr>
-                <tr><td>Ждут проверки</td><td>@_stats.AttemptsPending</td></tr>
-                <tr><td>Оценено с процентом</td><td>@_stats.GradedCount</td></tr>
-                <tr><td>Средний процент (по @_stats.GradedCount оценённым)</td><td>@_stats.AveragePercent%</td></tr>
-                <tr><td>Бумажных работ</td><td>@_stats.PaperWorks</td></tr>
-            </tbody>
-        </table>
-        <p>
-            <a class="ef-button ef-button--secondary" href="@($"api/assignments/{_selectedAssignmentId}/gradebook.xlsx")" download>Скачать XLSX</a>
-            <a class="ef-button ef-button--quiet" href="@($"api/assignments/{_selectedAssignmentId}/gradebook.csv")" download>CSV</a>
-        </p>
+        <div class="ef-page-heading">
+            <h2 id="stats-title" class="ef-card__title">Ведомость</h2>
+            <div class="ef-actions">
+                <a class="ef-button ef-button--secondary" href="@($"api/assignments/{_selectedAssignmentId}/gradebook.xlsx")" download>Скачать XLSX</a>
+                <a class="ef-button ef-button--quiet" href="@($"api/assignments/{_selectedAssignmentId}/gradebook.csv")" download>Скачать CSV</a>
+            </div>
+        </div>
+        <p>Приглашено @_stats.StudentsInvited · Попыток @_stats.AttemptsTotal · Ждут проверки @_stats.AttemptsPending</p>
+        @if (_stats.GradedCount > 0)
+        {
+            <p class="ef-card__meta">Средний балл в процентах: @_stats.AveragePercent% по @_stats.GradedCount оценённым попыткам.</p>
+        }
+        @if (_gradebook.Rows.Count == 0)
+        {
+            <p>Пока никто не начал работу. <a href="@($"cabinet/assignments/{_selectedAssignmentId}")">Открыть назначение</a></p>
+        }
+        else
+        {
+            <div class="ef-table-scroll" tabindex="0" role="region" aria-label="Ведомость">
+                <table class="ef-table">
+                    <caption>@_gradebook.Title</caption>
+                    <thead>
+                        <tr>
+                            <th scope="col">Студент</th><th scope="col">Группа</th><th scope="col">Попытка</th>
+                            <th scope="col">Статус</th><th scope="col">Баллы</th><th scope="col">Лучшая попытка</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var row in _gradebook.Rows.Skip(_page * PageSize).Take(PageSize))
+                        {
+                            <tr>
+                                <td>@row.Student</td><td>@(row.Group ?? "—")</td>
+                                <td>@(row.Origin == "Paper" ? "На бумаге" : row.AttemptNumber?.ToString() ?? "—")</td>
+                                <td>@row.Status</td>
+                                <td>@(row.Earned is { } earned ? $"{earned:0.##} из {row.Max:0.##} · {row.Percent}%" : "—")</td>
+                                <td>@(row.IsBest ? "Да" : "—")</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+            @if (_gradebook.Rows.Count > PageSize)
+            {
+                <div class="ef-actions">
+                    <button class="ef-button ef-button--secondary" disabled="@(_page == 0)" @onclick="() => _page--">Назад</button>
+                    <span>Страница @(_page + 1) из @((_gradebook.Rows.Count + PageSize - 1) / PageSize)</span>
+                    <button class="ef-button ef-button--secondary" disabled="@((_page + 1) * PageSize >= _gradebook.Rows.Count)" @onclick="() => _page++">Далее</button>
+                </div>
+            }
+        }
+    </section>
+    <section class="ef-card" aria-labelledby="analysis-title">
+        <h2 id="analysis-title" class="ef-card__title">Разбор по заданиям</h2>
+        @if (_analytics is null)
+        {
+            <button class="ef-button ef-button--secondary" @onclick="LoadAnalyticsAsync" disabled="@(_analyticsBusy || !RendererInfo.IsInteractive)">
+                Показать результаты по заданиям
+            </button>
+        }
+        else
+        {
+            <p class="ef-card__meta">Учитываются только полностью проверенные онлайн-попытки. Последний столбец добавляет задание в черновик тренировки.</p>
+            @if (_analytics.Any(item => item.TopicId is not null))
+            {
+                <h3>По темам</h3>
+                <ul class="ef-dashboard-list">
+                    @foreach (var topic in _analytics.Where(item => item.TopicId is not null)
+                        .GroupBy(item => new { item.TopicId, item.TopicName }))
+                    {
+                        var checkedAnswers = topic.Sum(item => item.SampleSize);
+                        var full = topic.Sum(item => item.FullCredit);
+                        <li><strong>@topic.Key.TopicName</strong> Полный балл за @full из @checkedAnswers ответов</li>
+                    }
+                </ul>
+            }
+            <div class="ef-table-scroll" tabindex="0" role="region" aria-label="Разбор по заданиям">
+                <table class="ef-table">
+                    <caption>Баллы и пропуски по заданиям</caption>
+                    <thead>
+                        <tr><th scope="col">Задание</th><th scope="col">Проверено</th><th scope="col">Полный балл</th>
+                            <th scope="col">Частично</th><th scope="col">Без баллов</th><th scope="col">Пропуск</th><th scope="col">В тренировку</th></tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var item in _analytics)
+                        {
+                            <tr>
+                                <td>@item.Prompt
+                                    @if (item.TopicName is { } topicName)
+                                    {
+                                        <div class="ef-card__meta">@topicName</div>
+                                    }
+                                </td><td>@item.SampleSize</td>
+                                <td>@(item.FullCreditPercent is { } percent ? $"{percent}%" : "—")</td>
+                                <td>@item.PartialCredit</td><td>@item.NoCredit</td><td>@item.Skipped</td>
+                                <td><input type="checkbox" aria-label="@($"В тренировку · {item.Prompt}")"
+                                           checked="@_trainingQuestions.Contains(item.QuestionVersionId)"
+                                           @onchange="args => SelectTraining(item.QuestionVersionId, args.Value is true)" /></td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+            <button class="ef-button ef-button--secondary" @onclick="CreateTrainingAsync" disabled="@(_analyticsBusy || _trainingQuestions.Count == 0)">
+                Создать черновик тренировки
+            </button>
+        }
+        @if (_analyticsError is not null)
+        {
+            <p class="ef-form-error" role="alert">@_analyticsError</p>
+        }
     </section>
 }
 
 @code {
+    [SupplyParameterFromQuery(Name = "assignment")] public Guid? AssignmentId { get; set; }
+
+    private const int PageSize = 30;
     private Guid? _selectedAssignmentId;
     private readonly List<TeacherAssignmentDto> _assignments = [];
     private AssignmentStatsDto? _stats;
+    private Gradebook? _gradebook;
+    private string? _error;
+    private bool _busy;
+    private bool _analyticsBusy;
+    private IReadOnlyList<QuestionPerformance>? _analytics;
+    private string? _analyticsError;
+    private readonly HashSet<Guid> _trainingQuestions = [];
+    private int _page;
+    private int _request;
 
     protected override async Task OnInitializedAsync()
     {
         _assignments.AddRange(await AssignmentsService.ListAssignmentsAsync(await ActorAsync(), CancellationToken.None));
-        // Автовыбор первого назначения: сводка показывается сразу без лишнего клика.
-        _selectedAssignmentId = _assignments.FirstOrDefault()?.AssignmentId;
-        if (_selectedAssignmentId is { } id)
-            _stats = await ResultsService.StatsAsync(await ActorAsync(), id, CancellationToken.None);
+        _selectedAssignmentId = _assignments.Any(assignment => assignment.AssignmentId == AssignmentId)
+            ? AssignmentId : _assignments.FirstOrDefault()?.AssignmentId;
+        await LoadResultsAsync();
     }
 
-    private async Task LoadStatsAsync()
+    private async Task LoadResultsAsync()
     {
-        if (_selectedAssignmentId is { } id)
-            _stats = await ResultsService.StatsAsync(await ActorAsync(), id, CancellationToken.None);
+        if (_selectedAssignmentId is not { } id)
+            return;
+
+        var request = ++_request;
+        _error = null;
+        _busy = true;
+        try
+        {
+            var actor = await ActorAsync();
+            var stats = await ResultsService.StatsAsync(actor, id, CancellationToken.None);
+            var gradebook = await ResultsService.GradebookAsync(actor, id, CancellationToken.None);
+            if (request != _request)
+                return;
+            _stats = stats;
+            _gradebook = gradebook;
+            _page = 0;
+            _analytics = null;
+            _analyticsError = null;
+            _trainingQuestions.Clear();
+        }
+        catch (ExamForge.Application.StudentFlow.StudentFlowException ex)
+        {
+            if (request == _request)
+                _error = ex.Message;
+        }
+        finally
+        {
+            if (request == _request)
+                _busy = false;
+        }
+    }
+
+    private async Task LoadAnalyticsAsync()
+    {
+        if (_analyticsBusy || _selectedAssignmentId is not { } id)
+            return;
+        _analyticsBusy = true;
+        _analyticsError = null;
+        try
+        {
+            var analytics = await Analytics.AnalyzeAsync(await ActorAsync(), id, CancellationToken.None);
+            if (_selectedAssignmentId != id)
+                return;
+            _analytics = analytics;
+            _trainingQuestions.UnionWith(analytics.Where(item => item.FullCreditPercent is < 70).Select(item => item.QuestionVersionId));
+        }
+        catch (ExamForge.Application.StudentFlow.StudentFlowException ex)
+        {
+            _analyticsError = ex.Message;
+        }
+        finally
+        {
+            _analyticsBusy = false;
+        }
+    }
+
+    private void SelectTraining(Guid id, bool selected)
+    {
+        if (selected) _trainingQuestions.Add(id);
+        else _trainingQuestions.Remove(id);
+    }
+
+    private async Task CreateTrainingAsync()
+    {
+        if (_analyticsBusy || _selectedAssignmentId is not { } id || _trainingQuestions.Count == 0)
+            return;
+        _analyticsBusy = true;
+        _analyticsError = null;
+        try
+        {
+            var testId = await Analytics.CreateTrainingDraftAsync(await ActorAsync(), id, _trainingQuestions, CancellationToken.None);
+            Navigation.NavigateTo($"cabinet/tests#t-{testId}");
+        }
+        catch (ExamForge.Application.StudentFlow.StudentFlowException ex)
+        {
+            _analyticsError = ex.Message;
+        }
+        finally
+        {
+            _analyticsBusy = false;
+        }
     }
 
     private async Task<TeacherActor> ActorAsync()

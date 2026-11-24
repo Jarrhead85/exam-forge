@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Mvc.ModelBinding;
 using ExamForge.Application.StudentFlow;
 using ExamForge.Web.Authentication;
 using Microsoft.AspNetCore.Authorization;
@@ -41,7 +42,8 @@ public sealed class AttemptsController(Infrastructure.Services.StudentFlowServic
     public async Task<IActionResult> SaveAnswer(Guid attemptId, Guid questionSessionId, [FromBody] SaveAnswerRequest body, CancellationToken ct)
     {
         var identity = User.StudentIdentity() ?? throw StudentFlowException.NotFound();
-        return Ok(await flow.SaveAnswerAsync(attemptId, questionSessionId, body.Answer.GetRawText(), identity, ct));
+        return Ok(await flow.SaveAnswerAsync(attemptId,
+            new AttemptAnswer(questionSessionId, body.Answer, body.ExpectedRevision), identity, ct));
     }
 
     [HttpPost("/api/attempts/{attemptId:guid}/lock-current")]
@@ -52,12 +54,21 @@ public sealed class AttemptsController(Infrastructure.Services.StudentFlowServic
         return Ok(await flow.LockCurrentAsync(attemptId, identity, ct));
     }
 
-    [HttpPost("/api/attempts/{attemptId:guid}/finish")]
+    [HttpPost("/api/attempts/{attemptId:guid}/advance")]
     [ValidateAntiForgeryToken]
-    public async Task<IActionResult> Finish(Guid attemptId, CancellationToken ct)
+    public async Task<IActionResult> Advance(Guid attemptId, [FromBody] AdvanceQuestionRequest request, CancellationToken ct)
     {
         var identity = User.StudentIdentity() ?? throw StudentFlowException.NotFound();
-        return Ok(await flow.FinishAsync(attemptId, identity, ct));
+        return Ok(await flow.AdvanceAsync(attemptId, request, identity, ct));
+    }
+
+    [HttpPost("/api/attempts/{attemptId:guid}/finish")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> Finish(
+        Guid attemptId, [FromBody(EmptyBodyBehavior = EmptyBodyBehavior.Allow)] AttemptAnswer? answer, CancellationToken ct)
+    {
+        var identity = User.StudentIdentity() ?? throw StudentFlowException.NotFound();
+        return Ok(await flow.FinishAsync(attemptId, answer is { QuestionSessionId: var id } && id != Guid.Empty ? answer : null, identity, ct));
     }
 
     [HttpGet("/api/attempts/{attemptId:guid}/result")]
@@ -67,6 +78,5 @@ public sealed class AttemptsController(Infrastructure.Services.StudentFlowServic
         return Ok(await flow.GetResultAsync(attemptId, identity, ct));
     }
 
-    /// <summary>Ответ передаётся как JSON-документ любого типа; сервер валидирует при оценивании.</summary>
-    public sealed record SaveAnswerRequest(System.Text.Json.JsonElement Answer);
+    public sealed record SaveAnswerRequest(System.Text.Json.JsonElement Answer, int? ExpectedRevision);
 }

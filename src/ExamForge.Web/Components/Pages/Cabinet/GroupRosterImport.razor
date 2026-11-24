@@ -1,0 +1,132 @@
+@using System.Text
+@using ExamForge.Application.TeacherFlow
+@using ExamForge.Application.StudentFlow
+@using ExamForge.Domain.Common
+@using ExamForge.Infrastructure.Services
+@inject GroupRosterImportService Import
+
+<details class="ef-roster-import">
+    <summary>Импортировать студентов из CSV</summary>
+    <div class="ef-field">
+        <label for="roster-@GroupId">Файл CSV</label>
+        <p id="roster-hint-@GroupId" class="ef-card__meta">Заголовки: «Фамилия;Имя;Отчество». Кодировка UTF-8, до 500 студентов.</p>
+        <InputFile id="@($"roster-{GroupId}")" OnChange="PreviewAsync" accept=".csv,text/csv" disabled="@(_busy || !RendererInfo.IsInteractive)"
+                   aria-describedby="@($"roster-hint-{GroupId}")" />
+    </div>
+    @if (_error is not null)
+    {
+        <p class="ef-form-error" role="alert">@_error</p>
+    }
+    @if (_status is not null)
+    {
+        <p role="status">@_status</p>
+    }
+    @if (_rows.Count > 0)
+    {
+        <p>Совпадения ФИО по умолчанию пропускаются. Если это другой студент, отметьте его для создания отдельного профиля.</p>
+        <div class="ef-roster-preview">
+            @foreach (var row in _rows)
+            {
+                if (row.Name is { } person)
+                {
+                    <label class="ef-roster-row">
+                        <input type="checkbox" checked="@_selected.Contains(row.Line)" disabled="@(_busy || !RendererInfo.IsInteractive)"
+                               @onchange="e => Select(row.Line, e.Value is true)" />
+                        <span>@person.FullName @(row.PossibleMatch ? "· Совпадение ФИО" : "")</span>
+                    </label>
+                }
+                else
+                {
+                    <p class="ef-form-error">Строка @row.Line. @row.Error</p>
+                }
+            }
+        </div>
+        <button class="ef-button ef-button--primary" disabled="@(_busy || _selected.Count == 0)" @onclick="ImportAsync">
+            Добавить выбранных (@_selected.Count)
+        </button>
+    }
+</details>
+
+@code {
+    [Parameter, EditorRequired] public Guid GroupId { get; set; }
+    [Parameter, EditorRequired] public Func<Task<TeacherActor>> Actor { get; set; } = default!;
+    [Parameter] public EventCallback OnImported { get; set; }
+
+    private const int MaxBytes = 1024 * 1024;
+    private IReadOnlyList<RosterPreviewRow> _rows = [];
+    private readonly HashSet<long> _selected = [];
+    private string? _error;
+    private string? _status;
+    private bool _busy;
+
+    private async Task PreviewAsync(InputFileChangeEventArgs args)
+    {
+        if (_busy)
+            return;
+
+        _busy = true;
+        _rows = [];
+        _selected.Clear();
+        _error = null;
+        _status = null;
+        try
+        {
+            if (args.File.Size > MaxBytes)
+                throw new DomainException("Размер CSV превышает 1 МБ. Разделите файл и загрузите его части.");
+            await using var stream = args.File.OpenReadStream(MaxBytes);
+            using var reader = new StreamReader(stream, new UTF8Encoding(false, true));
+            _rows = await Import.PreviewAsync(await Actor(), GroupId, await reader.ReadToEndAsync(), CancellationToken.None);
+            _selected.UnionWith(_rows.Where(row => row.Name is not null && !row.PossibleMatch).Select(row => row.Line));
+            if (_rows.Count == 0)
+                _status = "В файле только заголовок. Добавьте строки со студентами.";
+        }
+        catch (DecoderFallbackException)
+        {
+            _error = "Сохраните CSV в кодировке UTF-8 и загрузите его снова.";
+        }
+        catch (IOException)
+        {
+            _error = "Не удалось прочитать файл. Загрузите его снова.";
+        }
+        catch (Exception ex) when (ex is DomainException or StudentFlowException)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private void Select(long line, bool selected)
+    {
+        if (selected) _selected.Add(line);
+        else _selected.Remove(line);
+    }
+
+    private async Task ImportAsync()
+    {
+        if (_busy || _selected.Count == 0)
+            return;
+        _busy = true;
+        _error = null;
+        try
+        {
+            var names = _rows.Where(row => _selected.Contains(row.Line) && row.Name is not null)
+                .Select(row => row.Name!).ToArray();
+            var count = await Import.ImportAsync(await Actor(), GroupId, names, CancellationToken.None);
+            _rows = [];
+            _selected.Clear();
+            _status = $"Добавлено студентов: {count}.";
+            await OnImported.InvokeAsync();
+        }
+        catch (Exception ex) when (ex is DomainException or StudentFlowException)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+}

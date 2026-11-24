@@ -1,4 +1,4 @@
-﻿using ExamForge.Application.StudentFlow;
+using ExamForge.Application.StudentFlow;
 using ExamForge.Application.TeacherFlow;
 using ExamForge.Domain.Assignments;
 using ExamForge.Domain.Dictionary;
@@ -327,7 +327,7 @@ public sealed class CrudTests(ExamForgeWebFactory factory)
         await kit.Db.SaveChangesAsync();
 
         var assignments = new TeacherAssignmentsService(kit.Db, kit.Time,
-            factory.Services.GetRequiredService<ExamForge.Domain.Access.InvitationCodeHasher>());
+            factory.Services.GetRequiredService<ExamForge.Domain.Access.InvitationCodeHasher>(), new GroupService(kit.Db, kit.Time));
         // попытка блокирует удаление (история — 5 лет, ТЗ §21)
         var variant = Domain.Testing.Variant.Create(versionId, 1, "crud-seed", [questionVersionId], new Dictionary<string, List<string>>(), DateTimeOffset.UtcNow);
         kit.Db.Variants.Add(variant);
