@@ -1,40 +1,53 @@
 #!/usr/bin/env bash
-# Развёртывание Exam Forge на VDS (§21). Запускать из каталога с docker-compose.yml.
-# Перед этим: .env заполнен, исходники рядом (deploy/docker/Dockerfile в контексте ..).
+# Запускать из checkout проекта. Резервные копии содержат учебные данные.
 set -euo pipefail
 cd "$(dirname "$0")"
+umask 077
 
-echo "== 1. Проверка .env =="
-[ -f .env ] || { echo "Нет .env — скопируйте env.example и заполните."; exit 1; }
-grep -q CHANGE_ME .env && { echo "В .env остались CHANGE_ME значения."; exit 1; }
-
-echo "== 2. Backup БД (если уже существует) =="
-if docker compose exec db pg_dump -U examforge examforge > "backup-$(date +%Y%m%d-%H%M%S).sql" 2>/dev/null; then
-  echo "Backup сделан."
-else
-  echo "БД ещё нет — пропускаю backup (первый запуск)."
+[[ -f .env ]] || { echo "Скопируйте env.example в .env и заполните значения."; exit 1; }
+if grep -q 'CHANGE_ME' .env; then
+  echo "Заполните значения CHANGE_ME в .env."
+  exit 1
 fi
 
-echo "== 3. Сборка и запуск =="
-docker compose up -d --build
+host=$(sed -n 's/^EXAMFORGE_ALLOWED_HOSTS=//p' .env | tail -n 1 | cut -d ';' -f 1)
+[[ -n "$host" ]] || { echo "Укажите EXAMFORGE_ALLOWED_HOSTS в .env."; exit 1; }
 
-echo "== 4. Миграции (однократно, вручную — §21.9) =="
-docker compose run --rm app dotnet ExamForge.Web.dll --migrate
+docker compose build app
+docker compose up -d --wait db
+current_app=$(docker compose ps -a -q app)
+docker compose stop app
+migration_started=false
+restore_service_on_backup_error() {
+  if [[ "$migration_started" == false && -n "$current_app" ]]; then
+    docker compose start app || true
+  fi
+}
+trap restore_service_on_backup_error ERR
 
-echo "== 5. Ждём готовности БД/приложения =="
-# AllowedHosts проверяет Host-заголовок: smoke-тест идёт с доменным Host,
-# иначе App получит 400 (пустой checkHost возвращает не 200).
-# .env содержит EXAMFORGE_ALLOWED_HOSTS.
-if [ -f .env ]; then
-  # shellcheck disable=SC1091
-  . ./.env
+backup_dir="backups/$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$backup_dir"
+docker compose exec -T db pg_dump -Fc -U examforge examforge > "$backup_dir/database.dump"
+docker compose exec -T db pg_restore --list < "$backup_dir/database.dump" > /dev/null
+
+if [[ -n "$current_app" ]]; then
+  docker compose run --rm --no-deps -T --entrypoint tar app -C /data/storage -czf - . > "$backup_dir/storage.tar.gz"
+  tar -tzf "$backup_dir/storage.tar.gz" > /dev/null
 fi
-: "${EXAMFORGE_ALLOWED_HOSTS:=127.0.0.1}"
-for i in $(seq 1 30); do
-  if curl -sf -o /dev/null -H "Host: ${EXAMFORGE_ALLOWED_HOSTS%%,*}" http://127.0.0.1:8080/; then echo "Приложение отвечает."; break; fi
+
+migration_started=true
+docker compose run --rm --no-deps app --migrate
+docker compose up -d --no-deps app
+
+for (( attempt=1; attempt<=30; attempt++ )); do
+  status=$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 3 \
+    --header "Host: $host" --header 'X-Forwarded-Proto: https' http://127.0.0.1:8080/health/ready || true)
+  if [[ "$status" == 200 ]]; then
+    echo "Приложение готово. Резервная копия: $backup_dir"
+    exit 0
+  fi
   sleep 2
-  [ "$i" = 30 ] && { echo "Приложение не отвечает — смотрите docker compose logs app"; exit 1; }
 done
 
-echo "== Готово. Создайте администратора: =="
-echo "  docker compose run --rm app dotnet ExamForge.Web.dll --seed-admin <логин> <пароль> '<ФИО>'"
+echo "Приложение не прошло проверку готовности. Проверьте docker compose logs app."
+exit 1

@@ -52,3 +52,5 @@ Thumbs.db
 /skills/
 /deploy/smoke-*
 /deploy/add-bom.ps1
+
+/deploy/docker/backups/

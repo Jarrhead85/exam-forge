@@ -1,5 +1,5 @@
 # Exam Forge — стек развёртывания (§21): отдельный project name/сеть/тома.
-# SugarGuard не затрагивается: своя сеть, своя БД в контейнере, порт 8080 наружу.
+# SugarGuard не затрагивается: своя сеть, своя БД в контейнере и локальный порт приложения.
 name: examforge
 
 services:
@@ -27,7 +27,7 @@ services:
 
   app:
     build:
-      context: .
+      context: ../..
       dockerfile: deploy/docker/Dockerfile
     restart: unless-stopped
     depends_on:
@@ -42,14 +42,9 @@ services:
       ASPNETCORE_HTTPS_PORT: "443"
       # Прокси гарантирует TLS: cookie преподавателя, студента и antiforgery — Secure.
       ExamForge__Cookies__SecurePolicy: "Always"
-      # Диагностика медленной загрузки (временно): транспорт и тайминги каждого circuit.
-      # Http.Connections — категория negotiate/транспорта (SignalR — только hub-уровень).
-      Logging__LogLevel__Microsoft.AspNetCore.Http.Connections: Debug
-      Logging__LogLevel__Microsoft.AspNetCore.SignalR: Debug
-      Logging__LogLevel__Microsoft.AspNetCore.Components.Server: Debug
       ConnectionStrings__Default: "Host=db;Port=5432;Database=examforge;Username=examforge;Password=${EXAMFORGE_DB_PASSWORD}"
       ExamForge__InvitationHmacKey: ${EXAMFORGE_HMAC_KEY:?Задайте EXAMFORGE_HMAC_KEY в .env}
-      ExamForge__RateLimits__ExchangePerMinute: "15"
+      ExamForge__RateLimits__ExchangePerMinute: "90"
       # Host-filtering: в production не "*" (домен задаётся в .env).
       AllowedHosts: ${EXAMFORGE_ALLOWED_HOSTS:?Задайте EXAMFORGE_ALLOWED_HOSTS в .env}
       EXAMFORGE_STORAGE_ROOT: /data/storage

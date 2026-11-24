@@ -19,3 +19,7 @@ deploy/smoke-*.ps1
 pubtest/
 ERR
 .tmp-*.ps1
+**/.env
+**/.env.*
+deploy/docker/backups/
+e2e/
